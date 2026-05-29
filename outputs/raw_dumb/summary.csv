@@ -1,0 +1,11 @@
+metric,value
+total_active_power_kW,-35.822572790249126
+total_reactive_power_kvar,-12.534435856919558
+total_losses_W,841.5973628179644
+total_losses_var,1017.4896894479629
+min_phase_voltage_pu,0.9609600748170198
+max_phase_voltage_pu,0.9999938021890936
+mean_phase_voltage_pu,0.9841659278687932
+n_buses,18.0
+n_phase_nodes,51.0
+n_total_nodes,70.0

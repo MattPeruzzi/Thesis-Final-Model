@@ -1,0 +1,157 @@
+# -----------------------------------------------------------------------------
+# Note on AI assistance:
+# An AI assistant (Anthropic's Claude) was used to improve the readability of
+# this code — formatting, comments, variable naming, and structural clean-up.
+# The underlying logic, methodology, and implementation are the author's own.
+# -----------------------------------------------------------------------------
+
+
+! ============================================================================
+!  LV Distribution Network Model — North Feeder Only
+!  ----------------------------------------------------------------------------
+!  3-phase 4-wire low-voltage feeder, 50 Hz, 11 kV / 0.4 kV
+!  16 LV buses, 25 single-phase residential loads.
+!  Multi-point neutral earthing.
+! ============================================================================
+
+Clear
+Set DefaultBaseFrequency=50
+
+! ============================================================================
+!  CIRCUIT & SOURCEth
+! ============================================================================
+
+New Circuit.LVNetwork phases=3 bus1=GridSupply basekV=11 pu=1.0 angle=0
+
+! ============================================================================
+!  CONDUCTOR DATA
+! ============================================================================
+
+New Wiredata.PhaseBowls   GMR=5.19 DIAM=14.3 RAC=0.352
+~ NormAmps=372 Runits=km radunits=mm gmrunits=mm
+
+New Wiredata.NeutralBowls GMR=5.19 DIAM=14.3 RAC=0.352
+~ NormAmps=372 Runits=km radunits=mm gmrunits=mm
+
+! ============================================================================
+!  LINE GEOMETRY
+! ============================================================================
+
+New LineGeometry.OverHead nconds=4 nphases=3
+~ cond=1 Wire=PhaseBowls   x=-110 h=580 units=cm
+~ cond=2 Wire=PhaseBowls   x=-45  h=580 units=cm
+~ cond=3 Wire=PhaseBowls   x=45   h=580 units=cm
+~ cond=4 Wire=NeutralBowls x=110  h=580 units=cm
+
+! ============================================================================
+!  DISTRIBUTION TRANSFORMER (200 kVA, 11 kV / 0.4 kV)
+! ============================================================================
+
+New Transformer.DistTx phases=3 windings=2 %loadloss=1.0 xhl=4
+~ wdg=1 bus=GridSupply.1.2.3        kV=11   kva=200 conn=delta
+~ wdg=2 bus=TxSecondary.1.2.3.4     kV=0.4  kva=200 conn=wye Rneut=0.3 Xneut=0
+
+! ============================================================================
+!  FEEDER NORTH TOPOLOGY
+! ============================================================================
+
+! ----- Feeder North trunk ------------------------------------------------
+New Line.L_TxSecondary__FN_Trunk  bus1=TxSecondary.1.2.3.4  bus2=FN_Trunk.1.2.3.4  Geometry=OverHead Length=0.08 units=km
+
+! ----- NorthSpine --------------------------------------------------------
+New Line.L_FN_Trunk__NorthSpine_1  bus1=FN_Trunk.1.2.3.4  bus2=NorthSpine_1.1.2.3.4  Geometry=OverHead Length=0.08 units=km
+New Line.L_NorthSpine_1__NorthSpine_2  bus1=NorthSpine_1.1.2.3.4  bus2=NorthSpine_2.1.2.3.4  Geometry=OverHead Length=0.08 units=km
+New Line.L_NorthSpine_2__NorthSpine_End  bus1=NorthSpine_2.1.2.3.4  bus2=NorthSpine_End.1.2.3.4  Geometry=OverHead Length=0.08 units=km
+
+! ----- West branch -------------------------------------------------------
+New Line.L_FN_Trunk__West_1  bus1=FN_Trunk.1.2.3.4  bus2=West_1.1.2.3.4  Geometry=OverHead Length=0.08 units=km
+New Line.L_West_1__West_2  bus1=West_1.1.2.3.4  bus2=West_2.1.2.3.4  Geometry=OverHead Length=0.08 units=km
+New Line.L_West_2__West_Junction  bus1=West_2.1.2.3.4  bus2=West_Junction.1.2.3.4  Geometry=OverHead Length=0.08 units=km
+New Line.L_West_Junction__West_End_A  bus1=West_Junction.1.2.3.4  bus2=West_End_A.1.2.3.4  Geometry=OverHead Length=0.08 units=km
+New Line.L_West_Junction__West_End_B  bus1=West_Junction.1.2.3.4  bus2=West_End_B.1.2.3.4  Geometry=OverHead Length=0.08 units=km
+
+! ----- East branch -------------------------------------------------------
+New Line.L_FN_Trunk__East_1  bus1=FN_Trunk.1.2.3.4  bus2=East_1.1.2.3.4  Geometry=OverHead Length=0.08 units=km
+New Line.L_East_1__East_Junction  bus1=East_1.1.2.3.4  bus2=East_Junction.1.2.3.4  Geometry=OverHead Length=0.08 units=km
+New Line.L_East_Junction__East_North_1  bus1=East_Junction.1.2.3.4  bus2=East_North_1.1.2.3.4  Geometry=OverHead Length=0.08 units=km
+New Line.L_East_North_1__East_North_End  bus1=East_North_1.1.2.3.4  bus2=East_North_End.1.2.3.4  Geometry=OverHead Length=0.08 units=km
+New Line.L_East_Junction__East_South_1  bus1=East_Junction.1.2.3.4  bus2=East_South_1.1.2.3.4  Geometry=OverHead Length=0.08 units=km
+New Line.L_East_South_1__East_South_End  bus1=East_South_1.1.2.3.4  bus2=East_South_End.1.2.3.4  Geometry=OverHead Length=0.08 units=km
+
+! ============================================================================
+!  VOLTAGE BASES
+! ============================================================================
+
+Set VoltageBases=[11, 0.4]
+CalcVoltageBases
+
+! Dummy loadshape - overwritten per slot by Julia runtime
+New LoadShape.Shape_A1 npts=2 interval=1.0 mult=(1.0 1.0)
+
+! ============================================================================
+!  CUSTOMER LOADS
+!  25 single-phase residential connections.
+!  Each: 230 V phase-to-neutral, 3.0 kW @ 0.95 PF (placeholder), constant-PQ.
+!  Phase notation: .1=A, .2=B, .3=C; .4 is the neutral conductor.
+!  Load names retained from original network for compatibility.
+! ============================================================================
+
+! ----- Transformer secondary ---------------------------------------------
+New Load.Ld1   bus1=TxSecondary.1.4 phases=1 kV=0.23 kW=3.0 pf=0.95 model=1 yearly=Shape_A1   ! H01
+
+! ----- FN_Trunk ----------------------------------------------------------
+New Load.Ld2   bus1=FN_Trunk.2.4 phases=1 kV=0.23 kW=3.0 pf=0.95 model=1 yearly=Shape_A1   ! H02
+
+! ----- NorthSpine --------------------------------------------------------
+New Load.Ld3   bus1=NorthSpine_1.3.4 phases=1 kV=0.23 kW=3.0 pf=0.95 model=1 yearly=Shape_A1   ! H03
+New Load.Ld4   bus1=NorthSpine_2.1.4 phases=1 kV=0.23 kW=3.0 pf=0.95 model=1 yearly=Shape_A1   ! H04
+New Load.Ld29  bus1=NorthSpine_End.2.4 phases=1 kV=0.23 kW=3.0 pf=0.95 model=1 yearly=Shape_A1   ! H29
+New Load.Ld30  bus1=NorthSpine_End.3.4 phases=1 kV=0.23 kW=3.0 pf=0.95 model=1 yearly=Shape_A1   ! H30
+New Load.Ld31  bus1=NorthSpine_End.1.4 phases=1 kV=0.23 kW=3.0 pf=0.95 model=1 yearly=Shape_A1   ! H31
+
+! ----- West branch -------------------------------------------------------
+New Load.Ld5   bus1=West_1.2.4 phases=1 kV=0.23 kW=3.0 pf=0.95 model=1 yearly=Shape_A1   ! H05
+New Load.Ld6   bus1=West_2.3.4 phases=1 kV=0.23 kW=3.0 pf=0.95 model=1 yearly=Shape_A1   ! H06
+New Load.Ld7   bus1=West_Junction.1.4 phases=1 kV=0.23 kW=3.0 pf=0.95 model=1 yearly=Shape_A1   ! H07
+New Load.Ld8   bus1=West_End_A.2.4 phases=1 kV=0.23 kW=3.0 pf=0.95 model=1 yearly=Shape_A1   ! H08
+New Load.Ld9   bus1=West_End_A.3.4 phases=1 kV=0.23 kW=3.0 pf=0.95 model=1 yearly=Shape_A1   ! H09
+New Load.Ld10  bus1=West_End_B.1.4 phases=1 kV=0.23 kW=3.0 pf=0.95 model=1 yearly=Shape_A1   ! H10
+New Load.Ld11  bus1=West_End_B.2.4 phases=1 kV=0.23 kW=3.0 pf=0.95 model=1 yearly=Shape_A1   ! H11
+New Load.Ld12  bus1=West_End_B.3.4 phases=1 kV=0.23 kW=3.0 pf=0.95 model=1 yearly=Shape_A1   ! H12
+
+! ----- East branch -------------------------------------------------------
+New Load.Ld13  bus1=East_1.1.4 phases=1 kV=0.23 kW=3.0 pf=0.95 model=1 yearly=Shape_A1   ! H13
+New Load.Ld14  bus1=East_Junction.2.4 phases=1 kV=0.23 kW=3.0 pf=0.95 model=1 yearly=Shape_A1   ! H14
+New Load.Ld15  bus1=East_North_1.3.4 phases=1 kV=0.23 kW=3.0 pf=0.95 model=1 yearly=Shape_A1   ! H15
+New Load.Ld16  bus1=East_North_1.1.4 phases=1 kV=0.23 kW=3.0 pf=0.95 model=1 yearly=Shape_A1   ! H16
+New Load.Ld17  bus1=East_South_1.2.4 phases=1 kV=0.23 kW=3.0 pf=0.95 model=1 yearly=Shape_A1   ! H17
+New Load.Ld24  bus1=East_South_End.3.4 phases=1 kV=0.23 kW=3.0 pf=0.95 model=1 yearly=Shape_A1   ! H24
+New Load.Ld25  bus1=East_South_End.1.4 phases=1 kV=0.23 kW=3.0 pf=0.95 model=1 yearly=Shape_A1   ! H25
+New Load.Ld26  bus1=East_South_End.2.4 phases=1 kV=0.23 kW=3.0 pf=0.95 model=1 yearly=Shape_A1   ! H26
+New Load.Ld27  bus1=East_North_End.3.4 phases=1 kV=0.23 kW=3.0 pf=0.95 model=1 yearly=Shape_A1   ! H27
+New Load.Ld28  bus1=East_North_End.1.4 phases=1 kV=0.23 kW=3.0 pf=0.95 model=1 yearly=Shape_A1   ! H28
+
+! ============================================================================
+!  NEUTRAL EARTHING
+! ============================================================================
+
+New Reactor.Earth_TxSecondary               bus1=TxSecondary.4 bus2=0 R=10 X=0
+New Reactor.Earth_FN_Trunk                  bus1=FN_Trunk.4 bus2=0 R=10 X=0
+New Reactor.Earth_NorthSpine_1              bus1=NorthSpine_1.4 bus2=0 R=10 X=0
+New Reactor.Earth_NorthSpine_2              bus1=NorthSpine_2.4 bus2=0 R=10 X=0
+New Reactor.Earth_NorthSpine_End            bus1=NorthSpine_End.4 bus2=0 R=10 X=0
+New Reactor.Earth_West_1                    bus1=West_1.4 bus2=0 R=10 X=0
+New Reactor.Earth_West_2                    bus1=West_2.4 bus2=0 R=10 X=0
+New Reactor.Earth_West_Junction             bus1=West_Junction.4 bus2=0 R=10 X=0
+New Reactor.Earth_West_End_A                bus1=West_End_A.4 bus2=0 R=10 X=0
+New Reactor.Earth_West_End_B                bus1=West_End_B.4 bus2=0 R=10 X=0
+New Reactor.Earth_East_1                    bus1=East_1.4 bus2=0 R=10 X=0
+New Reactor.Earth_East_Junction             bus1=East_Junction.4 bus2=0 R=10 X=0
+New Reactor.Earth_East_North_1              bus1=East_North_1.4 bus2=0 R=10 X=0
+New Reactor.Earth_East_North_End            bus1=East_North_End.4 bus2=0 R=10 X=0
+New Reactor.Earth_East_South_1              bus1=East_South_1.4 bus2=0 R=10 X=0
+New Reactor.Earth_East_South_End            bus1=East_South_End.4 bus2=0 R=10 X=0
+
+! ============================================================================
+!  END
+! ============================================================================
