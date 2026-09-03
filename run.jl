@@ -11,6 +11,7 @@ include("load_consumer_profiles.jl")
 include("run_opendss_simulation.jl")
 include("analyse_results.jl")
 include("compare_results.jl")
+include("add_statcom.jl")
 
 # Base output folder — everything is written under here
 const OUTPUT_ROOT = "outputs"
@@ -58,3 +59,37 @@ println("BUILDING COMPARISON TABLES")
 println("="^70)
 comparison = compare_scenarios(analysis_dumb, analysis_smart;
     output_dir = joinpath(OUTPUT_ROOT, "comparison"))
+
+# ========================================================================
+# STATCOM PLACEMENT SCENARIOS (all on top of smart PV)
+# ========================================================================
+statcom_scenarios = (:none, :A_end, :B_junction, :C_decentralised)
+results_by_scenario = Dict{Symbol, Any}()
+analysis_by_scenario = Dict{Symbol, Any}()
+
+for scen in statcom_scenarios
+    println("\n" * "="^70)
+    println("STATCOM SCENARIO: $scen")
+    println("="^70)
+
+    results = run_opendss_simulation(consumers;
+        network_file = joinpath(@__DIR__, "LVNetwork.dss"),
+        mode = :daily,
+        transformer_kVA = 200.0,
+        pv_mode = :smart,
+        seed = 42,                    # same consumer→slot assignment across all scenarios
+        statcom_scenario = scen,
+        output_dir = joinpath(OUTPUT_ROOT, "raw_$(scen)"))
+
+    analysis = analyse_results(results;
+        output_dir = joinpath(OUTPUT_ROOT, "analysis_$(scen)"))
+
+    results_by_scenario[scen] = results
+    analysis_by_scenario[scen] = analysis
+end
+
+println("\n" * "="^70)
+println("BUILDING STATCOM COMPARISON TABLES")
+println("="^70)
+statcom_comparison = compare_statcom_scenarios(analysis_by_scenario;
+    output_dir = joinpath(OUTPUT_ROOT, "comparison_statcom"))

@@ -60,10 +60,12 @@ simulation, and return time-series + snapshot results.
 - `seed::Int` — RNG seed for reproducible consumer-to-slot assignment
 - `pv_mode::Symbol` — `:dumb` (PV as negative load, no inverter response)
                       or `:smart` (PVSystem with AS/NZS 4777.2:2020 control)
+- `statcom_scenario::Symbol` — STATCOM placement (`:none`, `:A_end`, `:B_junction`, `:C_decentralised`)
+- `statcom_kva_budget::Float64` — total STATCOM kVA split across the scenario's units (default 75)
 - `output_dir::String` — where to save result CSVs
 
 # Returns
-NamedTuple: (voltages, summary, timeseries, pv_mode)
+NamedTuple: (voltages, summary, timeseries, pv_mode, statcom_scenario, statcom_names)
 """
 function run_opendss_simulation(
     consumers::Vector{Consumer};
@@ -73,6 +75,8 @@ function run_opendss_simulation(
     transformer_kVA::Float64 = 200.0,
     seed::Int = 42,
     pv_mode::Symbol = :smart,
+    statcom_scenario::Symbol = :none,
+    statcom_kva_budget::Float64 = 75.0,
     output_dir::AbstractString = "opendss_results",
 )
     @assert pv_mode in (:dumb, :smart) "pv_mode must be :dumb or :smart"
@@ -81,7 +85,7 @@ function run_opendss_simulation(
     println("PV mode: $pv_mode")
 
     # ------------------------------------------------------------------
-    # STEP 1: Define the 25 North-feeder load slots and assign consumers
+    # Define the 25 North-feeder load slots and assign consumers
     # ------------------------------------------------------------------
     slot_load_names = ["Ld1", "Ld2", "Ld3", "Ld4", "Ld5", "Ld6", "Ld7", "Ld8",
                        "Ld9", "Ld10", "Ld11", "Ld12", "Ld13", "Ld14", "Ld15",
@@ -103,7 +107,7 @@ function run_opendss_simulation(
     println("Consumer-to-slot assignment: $(minimum(counts))–$(maximum(counts)) consumers per slot (mean $(round(mean(counts), digits=1)))")
 
     # ------------------------------------------------------------------
-    # STEP 2: Determine simulation horizon
+    # Determine simulation horizon
     # ------------------------------------------------------------------
     first_df = consumers[1].PV_profile
     npts_total = nrow(first_df)
@@ -116,7 +120,7 @@ function run_opendss_simulation(
     println("Simulation mode: $mode  ($(npts_to_use) timesteps at $(interval_minutes)-min resolution)")
 
     # ------------------------------------------------------------------
-    # STEP 3: Build aggregated load and PV profiles per slot
+    # Build aggregated load and PV profiles per slot
     # ------------------------------------------------------------------
     aggregated_load = zeros(Float64, npts_to_use, n_slots)
     aggregated_pv   = zeros(Float64, npts_to_use, n_slots)
@@ -130,20 +134,20 @@ function run_opendss_simulation(
     end
 
     # ------------------------------------------------------------------
-    # STEP 4: Compile the existing network
+    # Compile the existing network
     # ------------------------------------------------------------------
     dss("Clear")
     dss("Compile \"$network_file\"")
     println("Compiled network: $network_file")
 
     # ------------------------------------------------------------------
-    # STEP 5: Set transformer rating
+    # Set transformer rating
     # ------------------------------------------------------------------
     dss("Edit Transformer.DistTx kVAs=[$(transformer_kVA) $(transformer_kVA)]")
     println("Transformer set to $(transformer_kVA) kVA")
 
     # ------------------------------------------------------------------
-    # STEP 6: Inject loadshapes, update each load, and add PV elements
+    # Inject loadshapes, update each load, and add PV elements
     # ------------------------------------------------------------------
     daily_or_yearly = mode == :daily ? "daily" : "yearly"
 
@@ -197,7 +201,7 @@ function run_opendss_simulation(
     println("Injected $(n_slots) loadshapes + PV elements ($pv_mode mode)")
 
     # ------------------------------------------------------------------
-    # STEP 6.25: Define inverter control curves (smart mode only)
+    # Define inverter control curves (smart mode only)
     # ------------------------------------------------------------------
     if pv_mode == :smart
         # Volt-Watt curve: full power below 1.06 pu, ramping to 20% at 1.10 pu
@@ -219,8 +223,11 @@ function run_opendss_simulation(
         println("Applied AS/NZS 4777.2:2020 Volt-Watt + Volt-Var control")
     end
 
+    statcom_names = add_statcom_scenario!(statcom_scenario; total_kva_budget = statcom_kva_budget)
+
+
     # ------------------------------------------------------------------
-    # STEP 6.5: Add monitors for time-series recording
+    # Add monitors for time-series recording
     # ------------------------------------------------------------------
     # Voltage monitors on every load (mode=0 = V/I)
     for slot in 1:n_slots
@@ -232,6 +239,10 @@ function run_opendss_simulation(
     pv_class = pv_mode == :dumb ? "Load" : "PVSystem"
     for slot in 1:n_slots
         dss("New Monitor.M_P_PV$(slot) element=$(pv_class).PV$(slot) terminal=1 mode=1")
+    end
+
+    for name in statcom_names
+        dss("New Monitor.M_Q_$(name) element=Storage.$(name) terminal=1 mode=1")
     end
 
     # Power monitor on the transformer secondary (mode=1)
@@ -248,17 +259,19 @@ function run_opendss_simulation(
         dss("New Monitor.M_VBUS_$(bus) element=Line.$(line_name) terminal=$(terminal) mode=0")
     end
 
-    n_monitors = 2 * n_slots + 4 + length(LV_BUSES)
+    n_monitors = 2 * n_slots + 4 + length(LV_BUSES) + length(statcom_names)
     println("Added $(n_monitors) monitors")
 
     # ------------------------------------------------------------------
-    # STEP 7: Configure and solve
+    # Configure and solve
     # ------------------------------------------------------------------
     Solution.Mode(mode == :daily ? 1 : 2)
     Solution.Number(npts_to_use)
     Solution.StepSize(Float64(sinterval_seconds))
     Solution.Hour(0.0)
     Solution.Seconds(0.0)
+
+    dss("Set MaxControlIter=100")
 
     println("Solving...")
     Solution.Solve()
@@ -270,33 +283,37 @@ function run_opendss_simulation(
     end
 
     # ------------------------------------------------------------------
-    # STEP 7.5: Save monitor data
+    # Save monitor data
     # ------------------------------------------------------------------
     println("Saving monitor data...")
     dss("Save Monitors")
 
     # ------------------------------------------------------------------
-    # STEP 8: Collect results
+    # Collect results
     # ------------------------------------------------------------------
-    base_results = collect_results(output_dir; slot_load_names = slot_load_names, n_slots = n_slots)
+    base_results = collect_results(output_dir;
+        slot_load_names = slot_load_names, n_slots = n_slots, statcom_names = statcom_names)
 
     return (
         voltages = base_results.voltages,
         summary = base_results.summary,
         timeseries = base_results.timeseries,
         pv_mode = pv_mode,
+        statcom_scenario = statcom_scenario,
+        statcom_names = statcom_names,
     )
 end
 
 
 """
-    collect_results(output_dir; slot_load_names, n_slots)
+    collect_results(output_dir; slot_load_names, n_slots, statcom_names)
 
 After Solve(), pull bus voltages, summary, and monitor time-series into DataFrames.
 """
 function collect_results(output_dir::AbstractString;
                          slot_load_names::Vector{String} = String[],
-                         n_slots::Int = 0)
+                         n_slots::Int = 0,
+                         statcom_names::Vector{String} = String[])
     bus_names    = Circuit.AllBusNames()
     node_vmag_pu = Circuit.AllBusMagPu()
     node_names   = Circuit.AllNodeNames()
@@ -335,7 +352,7 @@ function collect_results(output_dir::AbstractString;
     println("Snapshot results written to $output_dir")
 
     # ----- Time-series from monitors -----
-    monitor_data = read_all_monitors(slot_load_names, n_slots)
+    monitor_data = read_all_monitors(slot_load_names, n_slots, statcom_names)
 
     ts_dir = joinpath(output_dir, "timeseries")
     mkpath(ts_dir)
@@ -349,11 +366,12 @@ end
 
 
 """
-    read_all_monitors(slot_load_names, n_slots)
+    read_all_monitors(slot_load_names, n_slots, statcom_names)
 
 Pull every monitor's data into Julia DataFrames.
 """
-function read_all_monitors(slot_load_names::Vector{String}, n_slots::Int)
+function read_all_monitors(slot_load_names::Vector{String}, n_slots::Int,
+                           statcom_names::Vector{String} = String[])
     data = Dict{String, DataFrame}()
 
     for load_name in slot_load_names
@@ -381,6 +399,14 @@ function read_all_monitors(slot_load_names::Vector{String}, n_slots::Int)
 
     for bus in LV_BUSES
         m_name = "M_VBUS_$(bus)"
+        df = read_monitor_to_df(m_name)
+        if df !== nothing
+            data[m_name] = df
+        end
+    end
+
+    for name in statcom_names
+        m_name = "M_Q_$(name)"
         df = read_monitor_to_df(m_name)
         if df !== nothing
             data[m_name] = df
