@@ -1,9 +1,9 @@
-# -----------------------------------------------------------------------------
-# Note on AI assistance:
-# An AI assistant (Anthropic's Claude) was used to improve the readability of
-# this code — formatting, comments, variable naming, and structural clean-up.
-# The underlying logic, methodology, and implementation are the author's own.
-# -----------------------------------------------------------------------------
+! -----------------------------------------------------------------------------
+! Note on AI assistance:
+! An AI assistant (Anthropic's Claude) was used to improve the readability of
+! this code — formatting, comments, variable naming, and structural clean-up.
+! The underlying logic, methodology, and implementation are the author's own.
+! -----------------------------------------------------------------------------
 
 
 ! ============================================================================
