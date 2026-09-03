@@ -179,6 +179,23 @@ function analyse_results(
     println("  saved vuf_per_bus.csv")
 
     # ------------------------------------------------------------------
+    # PLOT 8: STATCOM reactive power output (only if this run had any)
+    # ------------------------------------------------------------------
+    if !isempty(results.statcom_names)
+        println("Generating plot 8: STATCOM reactive power output...")
+        p8 = plot(; title="STATCOM reactive power output across the day",
+                  xlabel="Hour of day", ylabel="Q (kvar)",
+                  xlims=(0, 24), xticks=0:3:24, size=(1400, 600), dpi=200)
+        for name in results.statcom_names
+            df_q = ts["M_Q_$(name)"]
+            q_kvar = df_q[!, Symbol("S1 (kVA)")] .* sin.(deg2rad.(df_q.Ang1))
+            plot!(p8, hours, q_kvar; label=name, linewidth=1.5)
+        end
+        savefig(p8, joinpath(output_dir, "08_statcom_reactive_output.png"))
+        println("  saved 08_statcom_reactive_output.png")
+    end
+
+    # ------------------------------------------------------------------
     # PLOT 4: Voltage compliance % at each bus
     # ------------------------------------------------------------------
     println("Generating plot 4: Voltage compliance per bus...")

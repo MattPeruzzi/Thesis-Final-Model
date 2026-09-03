@@ -136,6 +136,51 @@ function build_per_bus_vuf_table(a_dumb, a_smart)
     return df
 end
 
+# ------------------------------------------------------------------
+# STATCOM scenario comparison (:none / :A_end / :B_junction / :C_decentralised)
+# ------------------------------------------------------------------
+function compare_statcom_scenarios(analyses::Dict{Symbol,Any}; output_dir::AbstractString)
+    mkpath(output_dir)
+    scenario_order = [:none, :A_end, :B_junction, :C_decentralised]
+    scenario_order = filter(s -> haskey(analyses, s), scenario_order)
+
+    summary = DataFrame(Metric = [
+        "Min phase voltage (pu)", "Max phase voltage (pu)", "Mean phase voltage (pu)",
+        "Voltage compliance (%)", "Peak VUF — IEC (%)", "Mean VUF — IEC (%)",
+        "Peak VUF — NEMA (%)", "Mean VUF — NEMA (%)",
+    ])
+    for scen in scenario_order
+        a = analyses[scen]
+        summary[!, Symbol(scen)] = [
+            round(minimum(a.compliance.min_pu), digits=3),
+            round(maximum(a.compliance.max_pu), digits=3),
+            round(mean(a.compliance.mean_pu), digits=3),
+            round(mean(a.compliance.pct_within_band), digits=2),
+            round(maximum(a.peak_vuf.peak_vuf_iec), digits=3),
+            round(mean(a.peak_vuf.peak_vuf_iec), digits=3),
+            round(maximum(a.peak_vuf.peak_vuf_nema), digits=3),
+            round(mean(a.peak_vuf.peak_vuf_nema), digits=3),
+        ]
+    end
+
+    per_bus_vuf = DataFrame(Bus = analyses[scenario_order[1]].peak_vuf.bus)
+    for scen in scenario_order
+        per_bus_vuf[!, Symbol("IEC_", scen)] = analyses[scen].peak_vuf.peak_vuf_iec
+        per_bus_vuf[!, Symbol("NEMA_", scen)] = analyses[scen].peak_vuf.peak_vuf_nema
+    end
+
+    write_csv(summary, joinpath(output_dir, "statcom_summary.csv"))
+    write_markdown(summary, joinpath(output_dir, "statcom_summary.md"), "STATCOM scenario comparison")
+    write_latex(summary, joinpath(output_dir, "statcom_summary.tex"), "statcom-summary", "STATCOM scenario comparison.")
+    write_csv(per_bus_vuf, joinpath(output_dir, "statcom_per_bus_vuf.csv"))
+    write_markdown(per_bus_vuf, joinpath(output_dir, "statcom_per_bus_vuf.md"), "Per-bus VUF by STATCOM scenario")
+    write_latex(per_bus_vuf, joinpath(output_dir, "statcom_per_bus_vuf.tex"), "statcom-per-bus-vuf", "Per-bus VUF by STATCOM scenario.")
+    print_table(summary, "STATCOM SCENARIO SUMMARY")
+    print_table(per_bus_vuf, "PER-BUS VUF BY STATCOM SCENARIO")
+
+    return (summary = summary, per_bus_vuf = per_bus_vuf)
+end
+
 
 function write_csv(df::DataFrame, path::AbstractString)
     CSV.write(path, df)

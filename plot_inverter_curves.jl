@@ -10,8 +10,8 @@ using Plots.PlotMeasures
 
 
 # ----------------------------------------------------------------------
-# AS/NZS 4777.2:2020 default inverter response curves
-# Generates the methodology figure for the thesis
+# AS/NZS 4777.2:2020 default inverter response curves + STATCOM curve
+# Generates the methodology figures for the thesis
 # ----------------------------------------------------------------------
 
 # Volt-Watt curve
@@ -30,8 +30,21 @@ vw_y = [1.00, 1.00, 0.20, 0.20]
 vv_x = [0.85, 0.92, 0.98, 1.02, 1.08, 1.15]
 vv_y = [0.44, 0.44, 0.00, 0.00, -0.60, -0.60]
 
+# STATCOM Volt-Var curve
+# Below 0.94 pu: full capacitive Q (+1.0 pu)
+# 0.94 to 0.98 pu: linear ramp from 1.0 to 0
+# 0.98 to 1.02 pu: deadband (Q = 0)
+# 1.02 to 1.06 pu: linear ramp from 0 to -1.0
+# Above 1.06 pu: full inductive Q (-1.0 pu)
+# Narrower band + steeper slope than the PV curve above: matches
+# Statcom_VV_Curve in add_statcom.jl exactly — the STATCOM is a
+# dedicated compensator, not a certified consumer inverter, so it
+# is designed to react sooner and harder.
+statcom_x = [0.90, 0.94, 0.98, 1.02, 1.06, 1.10]
+statcom_y = [1.00, 1.00, 0.00, 0.00, -1.00, -1.00]
 
-# Output folder for the methodology figure
+
+# Output folder for the methodology figures
 const CURVES_DIR = joinpath("outputs", "inverter_curves")
 mkpath(CURVES_DIR)
 
@@ -60,7 +73,7 @@ annotate!(p_vw, 1.12, 0.25, text("20% min", :black, :left, 10))
 savefig(p_vw, joinpath(CURVES_DIR, "inverter_voltwatt_curve.png"))
 println("Saved $(joinpath(CURVES_DIR, "inverter_voltwatt_curve.png"))")
 
-# ------------------------- Volt-Var -------------------------
+# ------------------------- Volt-Var (PV inverter) -------------------------
 p_vv = plot(vv_x, vv_y;
     title="Volt-Var Response (AS/NZS 4777.2:2020 Default)",
     xlabel="Local voltage (pu)",
@@ -91,12 +104,44 @@ annotate!(p_vv, 1.09, -0.55, text("Inductive −0.60", :black, :left, 10))
 savefig(p_vv, joinpath(CURVES_DIR, "inverter_voltvar_curve.png"))
 println("Saved $(joinpath(CURVES_DIR, "inverter_voltvar_curve.png"))")
 
-# ------------------------- Combined 2-panel -------------------------
-p_combined = plot(p_vw, p_vv; layout=(2, 1), size=(900, 1000), dpi=200)
+# ------------------------- Volt-Var (STATCOM) -------------------------
+p_statcom = plot(statcom_x, statcom_y;
+    title="STATCOM Volt-Var Response",
+    xlabel="Local voltage (pu)",
+    ylabel="Reactive power (pu of rated, +ve = capacitive)",
+    legend=false,
+    linewidth=2.5, color=:darkgreen,
+    xlims=(0.90, 1.10),
+    ylims=(-1.1, 1.1),
+    grid=true, gridalpha=0.3,
+    size=(800, 500), dpi=200,
+    left_margin=8mm, bottom_margin=6mm)
+
+# Deadband shading
+plot!(p_statcom, [0.98, 1.02, 1.02, 0.98], [-1.1, -1.1, 1.1, 1.1];
+    seriestype=:shape, fillalpha=0.1, fillcolor=:gray, linealpha=0, label="")
+
+vline!(p_statcom, [0.94, 0.98, 1.02, 1.06]; color=:red, linewidth=1, linestyle=:dash, label="")
+hline!(p_statcom, [0.0]; color=:black, linewidth=0.8, linestyle=:dot, label="")
+
+annotate!(p_statcom, 0.94, -0.7, text("V = 0.94 pu", :red, :center, 9, rotation=90))
+annotate!(p_statcom, 0.98, -0.7, text("V = 0.98 pu", :red, :center, 9, rotation=90))
+annotate!(p_statcom, 1.02, 0.7, text("V = 1.02 pu", :red, :center, 9, rotation=90))
+annotate!(p_statcom, 1.06, 0.7, text("V = 1.06 pu", :red, :center, 9, rotation=90))
+annotate!(p_statcom, 1.00, 0.9, text("Deadband", :gray, :center, 10))
+annotate!(p_statcom, 0.905, 0.9, text("Full capacitive", :black, :left, 10))
+annotate!(p_statcom, 1.065, -0.9, text("Full inductive", :black, :left, 10))
+
+savefig(p_statcom, joinpath(CURVES_DIR, "statcom_voltvar_curve.png"))
+println("Saved $(joinpath(CURVES_DIR, "statcom_voltvar_curve.png"))")
+
+# ------------------------- Combined 3-panel -------------------------
+p_combined = plot(p_vw, p_vv, p_statcom; layout=(3, 1), size=(900, 1500), dpi=200)
 savefig(p_combined, joinpath(CURVES_DIR, "inverter_curves_combined.png"))
 println("Saved $(joinpath(CURVES_DIR, "inverter_curves_combined.png"))")
 
-println("\nAll done. Three PNGs in $CURVES_DIR/:")
+println("\nAll done. Four PNGs in $CURVES_DIR/:")
 println("  inverter_voltwatt_curve.png       (Volt-Watt only)")
-println("  inverter_voltvar_curve.png        (Volt-Var only)")
-println("  inverter_curves_combined.png      (both stacked — use for thesis methodology figure)")
+println("  inverter_voltvar_curve.png        (PV inverter Volt-Var only)")
+println("  statcom_voltvar_curve.png         (STATCOM Volt-Var only)")
+println("  inverter_curves_combined.png      (all three stacked — use for thesis methodology figure)")
