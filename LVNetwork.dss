@@ -1,9 +1,17 @@
-! -----------------------------------------------------------------------------
-! Note on AI assistance:
-! An AI assistant (Anthropic's Claude) was used to improve the readability of
-! this code — formatting, comments, variable naming, and structural clean-up.
-! The underlying logic, methodology, and implementation are the author's own.
-! -----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# Note on AI assistance:
+# AI assistants (Anthropic's Claude and OpenAI's ChatGPT) were used during the
+# development of this code. The network model, simulation design, choice of
+# cases and control laws, and analysis of the results are the author's own.
+#
+# AI was used to improve readability (formatting, comments, variable names,
+# docstrings and structural clean-up), to help with debugging, and to style
+# figures, including legends, layout and colour-blind-safe palettes. Some of
+# the simpler supporting code was also written with AI assistance to save
+# time, mainly plotting code and small helper functions that read saved
+# outputs and calculate summary values. All AI-assisted code was reviewed,
+# run and checked against the simulation outputs by the author.
+# -----------------------------------------------------------------------------
 
 
 ! ============================================================================

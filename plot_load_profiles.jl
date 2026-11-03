@@ -1,8 +1,16 @@
 # -----------------------------------------------------------------------------
 # Note on AI assistance:
-# An AI assistant (Anthropic's Claude) was used to improve the readability of
-# this code — formatting, comments, variable naming, and structural clean-up.
-# The underlying logic, methodology, and implementation are the author's own.
+# AI assistants (Anthropic's Claude and OpenAI's ChatGPT) were used during the
+# development of this code. The network model, simulation design, choice of
+# cases and control laws, and analysis of the results are the author's own.
+#
+# AI was used to improve readability (formatting, comments, variable names,
+# docstrings and structural clean-up), to help with debugging, and to style
+# figures, including legends, layout and colour-blind-safe palettes. Some of
+# the simpler supporting code was also written with AI assistance to save
+# time, mainly plotting code and small helper functions that read saved
+# outputs and calculate summary values. All AI-assisted code was reviewed,
+# run and checked against the simulation outputs by the author.
 # -----------------------------------------------------------------------------
 
 
@@ -24,21 +32,42 @@ const OI_BLACK   = RGB(0.00, 0.00, 0.00)
 
 # Plot style settings for all plots (font, size, margins, grid, etc.)
 const BASE_STYLE = (
-    titlefont     = font(14, "Arial"),
-    tickfont      = font(10, "Arial"),
-    guidefont     = font(11, "Arial"),
-    legendfont    = font(10, "Arial"),
-    size          = (1400, 600),
+    titlefont     = font(10, "Computer Modern"),
+    tickfont      = font(8, "Computer Modern"),
+    guidefont     = font(9, "Computer Modern"),
+    legendfont    = font(8, "Computer Modern"),
+    size          = (630, 280),
     dpi           = 200,
-    left_margin   = 12Plots.mm,
-    right_margin  = 6Plots.mm,
-    top_margin    = 10Plots.mm,
-    bottom_margin = 10Plots.mm,
+    left_margin   = 4Plots.mm,
+    right_margin  = 2Plots.mm,
+    top_margin    = 2Plots.mm,
+    bottom_margin = 4Plots.mm,
     gridcolor     = :lightgrey,
     gridlinewidth = 0.8,
     framestyle    = :box,
     background_color_inside = :white,
+    legend        = :outertop,
+    legend_column = -1,
+    foreground_color_legend = nothing,
 )
+
+# Legend on its own strip above a multi-panel figure, so it never covers data
+# and every panel keeps the same size
+function legend_strip(entries; ncol::Int = length(entries))
+    p = plot(; framestyle = :none, grid = false, xticks = false, yticks = false,
+             xlims = (0, 1), ylims = (0, 1), legend = :top, legend_column = ncol,
+             legendfont = font(8, "Computer Modern"), foreground_color_legend = nothing)
+    for (lab, col, ls) in entries
+        plot!(p, [NaN], [NaN]; label = lab, color = col, linestyle = ls, linewidth = 2.2)
+    end
+    return p
+end
+
+with_strip(body, entries; w = 630, h = 260, strip = 0.12, ncol::Int = length(entries)) =
+    plot(legend_strip(entries; ncol = ncol), body; layout = grid(2, 1, heights = [strip, 1 - strip]), size = (w, h))
+
+sc_title(lbl, ratio) = "$(uppercasefirst(lbl)) self-consumption (SC = $(round(ratio, digits = 2)))"
+sc_short(lbl, ratio) = "$(uppercasefirst(lbl)) (SC = $(round(ratio, digits = 2)))"
 
 
 
@@ -70,6 +99,13 @@ function plot_individual_load_profiles( consumers::Vector{Consumer}; output_dir:
     save_fig(build_fleet_season(frames, "Autumn"), output_dir, "fleet_03_autumn")
     save_fig(build_fleet_season(frames, "Winter"), output_dir, "fleet_03_winter")
     save_fig(build_fleet_season(frames, "Spring"), output_dir, "fleet_03_spring")
+
+    # All four seasons in one 2x2 figure (appendix), shared y-axis for comparison
+    seasons = [plot(build_fleet_season(frames, s); title = s, legend = false)
+               for s in ("Summer", "Autumn", "Winter", "Spring")]
+    body = plot(seasons...; layout = (2, 2), link = :y, titlefont = font(9, "Computer Modern"))
+    save_fig(with_strip(body, [("Mean load", OI_BLUE, :solid), ("Mean PV", OI_ORANGE, :solid)]; h = 500, strip = 0.06),
+             output_dir, "fleet_03_seasons_combined")
 
     save_fig(build_fleet_duration_curve(frames), output_dir, "fleet_04_duration_curve")
 
@@ -134,13 +170,11 @@ function build_fleet_average_day(frames)
     hrs = fleet.minute_of_day ./ 60
 
     p = plot(hrs, fleet.load_mean;
-        label="Mean Load per household", color=OI_BLUE, linewidth=2.5,
+        label="Mean load per household", color=OI_BLUE, linewidth=2.5,
         ribbon=(fleet.load_mean .- fleet.load_p10, fleet.load_p90 .- fleet.load_mean),
         fillalpha=0.18, fillcolor=OI_BLUE,
         xlabel="Time of day (hours)", ylabel="Power per household (kW)",
-        title="\nFleet Average Daily Profile (shaded: 10th–90th percentile across $(length(frames)) consumers)",
-        xticks=0:3:24, xlims=(0, 24),
-        legend=:topright, grid=:both, BASE_STYLE...)
+        xticks=0:3:24, xlims=(0, 24), grid=:both, BASE_STYLE...)
 
     plot!(p, hrs, fleet.pv_mean;
         label="Mean PV per household", color=OI_ORANGE, linewidth=2.5,
@@ -164,17 +198,16 @@ function build_fleet_aggregate_day(frames)
     hrs = agg.minute_of_day ./ 60
 
     p = plot(hrs, agg.load_total;
-        label="Aggregate Load", color=OI_BLUE, linewidth=2.5,
+        label="Aggregate load", color=OI_BLUE, linewidth=2.5,
         xlabel="Time of day (hours)", ylabel="Total fleet power (kW)",
-        title="\nFleet Aggregate Daily Profile ($(length(frames)) consumers summed)",
-        xticks=0:3:24, xlims=(0, 24),
-        legend=:topright, grid=:both, BASE_STYLE...)
+        xticks=0:3:24, xlims=(0, 24), grid=:both, BASE_STYLE...)
+    plot!(p; legend_column = 2)
 
     plot!(p, hrs, agg.pv_total;
           label="Aggregate PV", color=OI_ORANGE, linewidth=2.5)
 
     plot!(p, hrs, agg.load_total .- agg.pv_total;
-          label="Net Demand (Load − PV)", color=OI_RED,
+          label="Net demand (load - PV)", color=OI_RED,
           linewidth=2.2, linestyle=:dash)
 
     return p
@@ -191,11 +224,9 @@ function build_fleet_season(frames, season::String)
     hrs = g.minute_of_day ./ 60
 
     p = plot(hrs, g.load;
-        label="Mean Load", color=OI_BLUE, linewidth=2.5,
+        label="Mean load", color=OI_BLUE, linewidth=2.5,
         xlabel="Time of day (hours)", ylabel="Power per household (kW)",
-        title="\nFleet Average Daily Profile — $season",
-        xticks=0:3:24, xlims=(0, 24),
-        legend=:topright, grid=:both, BASE_STYLE...)
+        xticks=0:3:24, xlims=(0, 24), grid=:both, BASE_STYLE...)
 
     plot!(p, hrs, g.pv;
           label="Mean PV", color=OI_ORANGE, linewidth=2.5)
@@ -219,11 +250,9 @@ function build_fleet_duration_curve(frames)
     pct = (1:length(load_sorted)) ./ length(load_sorted) .* 100
 
     p = plot(pct, load_sorted;
-        label="Aggregate Load", color=OI_BLUE, linewidth=2.5,
+        label="Aggregate load", color=OI_BLUE, linewidth=2.5,
         xlabel="Percent of year (%)", ylabel="Total fleet power (kW)",
-        title="\nFleet Load & PV Duration Curves",
-        xticks=0:10:100, xlims=(0, 100),
-        legend=:topright, grid=:both, BASE_STYLE...)
+        xticks=0:10:100, xlims=(0, 100), grid=:both, BASE_STYLE...)
 
     plot!(p, pct, pv_sorted;
           label="Aggregate PV", color=OI_ORANGE, linewidth=2.5)
@@ -253,32 +282,29 @@ end
 function build_spectrum_average_day(chosen, labels, ratios)
     colours = (OI_BLUE, OI_GREEN, OI_RED)
     p = plot(; xlabel="Time of day (hours)", ylabel="Power (kW)",
-             title="\nAverage Daily Profile — 3 Consumers (low / medium / high self-consumption)",
-             xticks=0:3:24, xlims=(0, 24),
-             legend=:outertopright, grid=:both, BASE_STYLE...)
+             xticks=0:3:24, xlims=(0, 24), grid=:both,
+             merge(BASE_STYLE, (legend = false,))...)
 
+    entries = []
     for (f, lbl, ratio, col) in zip(chosen, labels, ratios, colours)
         g = sort(combine(groupby(f.df, :minute_of_day),
                          :total_load    => mean => :load,
                          :pv_generation => mean => :pv),
                  :minute_of_day)
         hrs = g.minute_of_day ./ 60
-
-        label_load = "Load — $(f.id) ($lbl, SC=$(round(ratio, digits=2)))"
-        label_pv   = "PV — $(f.id)"
-
-        plot!(p, hrs, g.load;  label=label_load, color=col, linewidth=2.2)
-        plot!(p, hrs, g.pv;    label=label_pv,   color=col,
-                               linewidth=1.8, linestyle=:dash)
+        plot!(p, hrs, g.load; color=col, linewidth=2.2)
+        plot!(p, hrs, g.pv;   color=col, linewidth=1.8, linestyle=:dash)
+        push!(entries, (sc_title(lbl, ratio), col, :solid))
     end
-    return p
+    push!(entries, ("Load (solid) / PV (dashed)", OI_BLACK, :dash))
+    return with_strip(p, entries; h = 320, strip = 0.18, ncol = 2)
 end
 
 
 # Comparison: 3 consumers, weekday vs weekend (3 small panels)
 function build_spectrum_weekday_weekend(chosen, labels, ratios)
     panels = []
-    for (f, lbl, ratio) in zip(chosen, labels, ratios)
+    for (k, (f, lbl, ratio)) in enumerate(zip(chosen, labels, ratios))
         g = sort(combine(groupby(f.df, [:minute_of_day, :is_weekend]),
                          :total_load => mean => :load),
                  [:is_weekend, :minute_of_day])
@@ -286,31 +312,20 @@ function build_spectrum_weekday_weekend(chosen, labels, ratios)
         weekend = filter(:is_weekend => ==(true),  g)
 
         pnl = plot(weekday.minute_of_day ./ 60, weekday.load;
-            label="Weekday", color=OI_BLUE, linewidth=2.2,
-            xlabel="Hour of day", ylabel="Load (kW)",
-            title="$(f.id) — $lbl (SC=$(round(ratio, digits=2)))",
-            xticks=0:6:24, xlims=(0, 24),
-            legend=:outertopright, grid=:both, framestyle=:box,
-            titlefont=font(12, "Arial"),
-            tickfont=font(9, "Arial"),
-            guidefont=font(10, "Arial"),
-            legendfont=font(9, "Arial"))
-
+            color=OI_BLUE, linewidth=2.0,
+            xlabel="Hour of day", ylabel=k == 1 ? "Load (kW)" : "",
+            title=sc_short(lbl, ratio),
+            xticks=0:6:24, xlims=(0, 24), legend=false, grid=:both, framestyle=:box,
+            titlefont=font(8, "Computer Modern"),
+            tickfont=font(7, "Computer Modern"),
+            guidefont=font(8, "Computer Modern"))
         plot!(pnl, weekend.minute_of_day ./ 60, weekend.load;
-              label="Weekend", color=OI_ORANGE, linewidth=2.2, linestyle=:dash)
+              color=OI_ORANGE, linewidth=2.0, linestyle=:dash)
         push!(panels, pnl)
     end
-
-    return plot(panels...;
-                layout=(1, 3),
-                size=(1800, 500),
-                dpi=200,
-                plot_title="Weekday vs Weekend Load — Low / Medium / High Self-Consumption",
-                plot_titlefont=font(14, "Arial"),
-                left_margin=8Plots.mm,
-                right_margin=6Plots.mm,
-                top_margin=10Plots.mm,
-                bottom_margin=8Plots.mm)
+    body = plot(panels...; layout=(1, 3), left_margin=3Plots.mm, bottom_margin=4Plots.mm)
+    return with_strip(body, [("Weekday", OI_BLUE, :solid), ("Weekend", OI_ORANGE, :dash)];
+                      h = 260, strip = 0.12)
 end
 
 
@@ -323,33 +338,24 @@ function build_spectrum_scatter(chosen, labels, ratios)
     )
 
     panels = []
-    for (f, lbl, ratio) in zip(chosen, labels, ratios)
+    for (k, (f, lbl, ratio)) in enumerate(zip(chosen, labels, ratios))
         pnl = scatter(f.df.pv_generation, f.df.total_load;
             label="", color=OI_BLUE, markersize=1.2,
             markerstrokewidth=0, alpha=0.06,
-            xlabel="PV generation (kW)", ylabel="Total load (kW)",
-            title="$(f.id) — $lbl (SC=$(round(ratio, digits=2)))",
-            xlims=(0, lim), ylims=(0, lim),
+            xlabel="PV generation (kW)", ylabel=k == 1 ? "Total load (kW)" : "",
+            title=sc_short(lbl, ratio),
+            xlims=(0, lim), ylims=(0, lim), aspect_ratio=:equal,
             legend=false, grid=:both, framestyle=:box,
-            titlefont=font(12, "Arial"),
-            tickfont=font(9, "Arial"),
-            guidefont=font(10, "Arial"))
-
+            titlefont=font(8, "Computer Modern"),
+            tickfont=font(7, "Computer Modern"),
+            guidefont=font(8, "Computer Modern"))
         plot!(pnl, [0, lim], [0, lim];
               color=OI_BLACK, linewidth=1.2, linestyle=:dash, label="")
         push!(panels, pnl)
     end
-
-    return plot(panels...;
-                layout=(1, 3),
-                size=(1800, 600),
-                dpi=200,
-                plot_title="Load vs PV per 5-min Sample — Low / Medium / High Self-Consumption",
-                plot_titlefont=font(14, "Arial"),
-                left_margin=10Plots.mm,
-                right_margin=6Plots.mm,
-                top_margin=10Plots.mm,
-                bottom_margin=10Plots.mm)
+    body = plot(panels...; layout=(1, 3), left_margin=3Plots.mm, bottom_margin=4Plots.mm)
+    return with_strip(body, [("Load = PV (above the line, all PV is used on site)", OI_BLACK, :dash)];
+                      h = 260, strip = 0.1)
 end
 
 
@@ -383,7 +389,14 @@ end
 
 # Helper function to save a plot with a consistent naming convention in the output directory.
 function save_fig(p, output_dir, suffix)
-    out_path = joinpath(output_dir, "$(suffix).png")
-    savefig(p, out_path)
+    # Vector PDF for the thesis. The load-vs-PV scatter has ~300k points, which
+    # makes a huge, slow PDF, so that one is saved as a high-resolution PNG.
+    if occursin("load_vs_pv", suffix)
+        out_path = joinpath(output_dir, "$(suffix).png")
+        savefig(plot(p; dpi = 300), out_path)
+    else
+        out_path = joinpath(output_dir, "$(suffix).pdf")
+        savefig(p, out_path)
+    end
     println("Saved: $out_path")
 end

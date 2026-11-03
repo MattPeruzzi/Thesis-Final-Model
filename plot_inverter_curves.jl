@@ -1,147 +1,95 @@
 # -----------------------------------------------------------------------------
 # Note on AI assistance:
-# An AI assistant (Anthropic's Claude) was used to improve the readability of
-# this code — formatting, comments, variable naming, and structural clean-up.
-# The underlying logic, methodology, and implementation are the author's own.
+# AI assistants (Anthropic's Claude and OpenAI's ChatGPT) were used during the
+# development of this code. The network model, simulation design, choice of
+# cases and control laws, and analysis of the results are the author's own.
+#
+# AI was used to improve readability (formatting, comments, variable names,
+# docstrings and structural clean-up), to help with debugging, and to style
+# figures, including legends, layout and colour-blind-safe palettes. Some of
+# the simpler supporting code was also written with AI assistance to save
+# time, mainly plotting code and small helper functions that read saved
+# outputs and calculate summary values. All AI-assisted code was reviewed,
+# run and checked against the simulation outputs by the author.
 # -----------------------------------------------------------------------------
 
 using Plots
-using Plots.PlotMeasures
+gr()
 
+TEXT_WIDTH_IN = 6.3       # LaTeX \textwidth in inches
+PX_PER_IN     = 100       # Plots.jl size units per inch
+figsize(w_in, h_in) = (round(Int, w_in * PX_PER_IN), round(Int, h_in * PX_PER_IN))
 
-# ----------------------------------------------------------------------
-# AS/NZS 4777.2:2020 default inverter response curves + STATCOM curve
-# Generates the methodology figures for the thesis
-# ----------------------------------------------------------------------
+default(fontfamily = "Computer Modern", titlefontsize = 9, guidefontsize = 9,
+        tickfontsize = 7, legendfontsize = 7, framestyle = :box, grid = true,
+        gridalpha = 0.2, linewidth = 1.6, legend = false,
+        left_margin = 3Plots.mm, bottom_margin = 4Plots.mm)
 
-# Volt-Watt curve
-# Below 1.06 pu: full power (1.0 pu)
-# 1.06 to 1.10 pu: linear ramp from 1.0 down to 0.20
-# Above 1.10 pu: limited to 0.20 pu
-vw_x = [0.90, 1.06, 1.10, 1.15]
-vw_y = [1.00, 1.00, 0.20, 0.20]
-
-# Volt-Var curve
-# Below 0.92 pu: 0.44 pu capacitive Q (positive)
-# 0.92 to 0.98 pu: linear ramp from 0.44 to 0
-# 0.98 to 1.02 pu: deadband (Q = 0)
-# 1.02 to 1.08 pu: linear ramp from 0 to -0.60
-# Above 1.08 pu: -0.60 pu inductive Q
-vv_x = [0.85, 0.92, 0.98, 1.02, 1.08, 1.15]
-vv_y = [0.44, 0.44, 0.00, 0.00, -0.60, -0.60]
-
-# STATCOM Volt-Var curve
-# Below 0.94 pu: full capacitive Q (+1.0 pu)
-# 0.94 to 0.98 pu: linear ramp from 1.0 to 0
-# 0.98 to 1.02 pu: deadband (Q = 0)
-# 1.02 to 1.06 pu: linear ramp from 0 to -1.0
-# Above 1.06 pu: full inductive Q (-1.0 pu)
-# Narrower band + steeper slope than the PV curve above: matches
-# Statcom_VV_Curve in add_statcom.jl exactly — the STATCOM is a
-# dedicated compensator, not a certified consumer inverter, so it
-# is designed to react sooner and harder.
-statcom_x = [0.90, 0.94, 0.98, 1.02, 1.06, 1.10]
-statcom_y = [1.00, 1.00, 0.00, 0.00, -1.00, -1.00]
-
-
-# Output folder for the methodology figures
-const CURVES_DIR = joinpath("outputs", "inverter_curves")
+CURVES_DIR = joinpath(@__DIR__, "outputs", "inverter_curves")
 mkpath(CURVES_DIR)
 
+V_NOM = 230.0
+
+# ------------------------- Curve definitions (volts) --------------------------
+# PV Volt-Watt: 100% up to 253 V, linear to 20% at 260 V
+vw_v = [200.0, 253.0, 260.0, 270.0]
+vw_p = [1.00, 1.00, 0.20, 0.20]
+
+# PV Volt-Var: +44% at/below 207 V, zero 220-240 V, -60% at/above 258 V
+vv_v = [195.0, 207.0, 220.0, 240.0, 258.0, 270.0]
+vv_q = [0.44, 0.44, 0.00, 0.00, -0.60, -0.60]
+
+# STATCOM Volt-Var (add_statcom.jl): 0.94 / 0.98 / 1.02 / 1.06 pu, +/-100%
+st_pu = [0.90, 0.94, 0.98, 1.02, 1.06, 1.10]
+st_v  = st_pu .* V_NOM
+st_q  = [1.00, 1.00, 0.00, 0.00, -1.00, -1.00]
+
+deadband!(p, v_lo, v_hi, ylo, yhi) =
+    plot!(p, [v_lo, v_hi, v_hi, v_lo], [ylo, ylo, yhi, yhi];
+          seriestype = :shape, fillalpha = 0.12, fillcolor = :grey, linealpha = 0, label = "")
+
 # ------------------------- Volt-Watt -------------------------
-p_vw = plot(vw_x, vw_y;
-    title="Volt-Watt Response (AS/NZS 4777.2:2020 Default)",
-    xlabel="Local voltage (pu)",
-    ylabel="Real power output (pu of rated)",
-    legend=false,
-    linewidth=2.5, color=:steelblue,
-    xlims=(0.90, 1.15),
-    ylims=(0, 1.1),
-    grid=true, gridalpha=0.3,
-    size=(800, 500), dpi=200,
-    left_margin=8mm, bottom_margin=6mm)
+p_vw = plot(vw_v, vw_p; color = RGB(0.00, 0.45, 0.70),
+    title = "(a) PV Volt-Watt", xlabel = "Voltage (V)", ylabel = "P (pu of rated)",
+    xlims = (225, 270), ylims = (0, 1.1),
+    xticks = ([230, 240, 253, 260], ["230", "240", "253", "260"]))
+vline!(p_vw, [253, 260]; color = :black, linestyle = :dot, linewidth = 0.8)
 
-vline!(p_vw, [1.06]; color=:red, linewidth=1, linestyle=:dash, label="")
-vline!(p_vw, [1.10]; color=:red, linewidth=1, linestyle=:dash, label="")
-hline!(p_vw, [1.0]; color=:gray, linewidth=0.8, linestyle=:dot, label="")
+# ------------------------- Volt-Var (PV) ---------------------
+p_vv = plot(vv_v, vv_q; color = RGB(0.80, 0.47, 0.65),
+    title = "(b) PV Volt-Var", xlabel = "Voltage (V)", ylabel = "Q (pu of rating)",
+    xlims = (195, 270), ylims = (-0.7, 0.55),
+    xticks = (vv_v[2:5], string.(Int.(vv_v[2:5]))))
+deadband!(p_vv, 220, 240, -0.7, 0.55)
+hline!(p_vv, [0.0]; color = :black, linewidth = 0.6)
+vline!(p_vv, vv_v[2:5]; color = :black, linestyle = :dot, linewidth = 0.8)
 
-annotate!(p_vw, 1.06, 0.55, text("V = 1.06 pu", :red, :center, 9, rotation=90))
-annotate!(p_vw, 1.10, 0.55, text("V = 1.10 pu", :red, :center, 9, rotation=90))
-annotate!(p_vw, 0.96, 1.05, text("Full power", :black, :left, 10))
-annotate!(p_vw, 1.12, 0.25, text("20% min", :black, :left, 10))
+# ------------------------- Volt-Var (STATCOM) ----------------
+p_st = plot(st_v, st_q; color = RGB(0.00, 0.62, 0.45),
+    title = "(c) STATCOM Volt-Var", xlabel = "Voltage (V)", ylabel = "Q (pu of rating)",
+    xlims = (st_v[1], st_v[end]), ylims = (-1.1, 1.1),
+    xticks = (st_v[2:5], string.(round.(Int, st_v[2:5]))))
+deadband!(p_st, st_v[3], st_v[4], -1.1, 1.1)
+hline!(p_st, [0.0]; color = :black, linewidth = 0.6)
+vline!(p_st, st_v[2:5]; color = :black, linestyle = :dot, linewidth = 0.8)
 
-savefig(p_vw, joinpath(CURVES_DIR, "inverter_voltwatt_curve.png"))
-println("Saved $(joinpath(CURVES_DIR, "inverter_voltwatt_curve.png"))")
+# ------------------------- Save ------------------------------
+# Separate figures: no "(a)/(b)/(c)" in the title, since they stand alone
+for (p, name, solo) in ((p_vw, "pv_voltwatt_curve", "PV Volt-Watt"),
+                        (p_vv, "pv_voltvar_curve", "PV Volt-Var"),
+                        (p_st, "statcom_voltvar_curve", "STATCOM Volt-Var"))
+    q = deepcopy(p)
+    plot!(q; title = solo, size = figsize(TEXT_WIDTH_IN / 2, 2.4))
+    savefig(q, joinpath(CURVES_DIR, "$(name).pdf"))
+end
 
-# ------------------------- Volt-Var (PV inverter) -------------------------
-p_vv = plot(vv_x, vv_y;
-    title="Volt-Var Response (AS/NZS 4777.2:2020 Default)",
-    xlabel="Local voltage (pu)",
-    ylabel="Reactive power (pu of rated, +ve = capacitive)",
-    legend=false,
-    linewidth=2.5, color=:purple,
-    xlims=(0.85, 1.15),
-    ylims=(-0.7, 0.55),
-    grid=true, gridalpha=0.3,
-    size=(800, 500), dpi=200,
-    left_margin=8mm, bottom_margin=6mm)
+# PV curves only (Volt-Watt and Volt-Var), for the Case 2 methodology section
+p_pv = plot(p_vw, p_vv; layout = (1, 2), size = figsize(TEXT_WIDTH_IN, 2.4),
+            left_margin = 4Plots.mm)
+savefig(p_pv, joinpath(CURVES_DIR, "pv_curves_combined.pdf"))
 
-# Deadband shading
-plot!(p_vv, [0.98, 1.02, 1.02, 0.98], [-0.7, -0.7, 0.55, 0.55];
-    seriestype=:shape, fillalpha=0.1, fillcolor=:gray, linealpha=0, label="")
+p_all = plot(p_vw, p_vv, p_st; layout = (1, 3), size = figsize(TEXT_WIDTH_IN, 2.3),
+             left_margin = 4Plots.mm)
+savefig(p_all, joinpath(CURVES_DIR, "control_curves_combined.pdf"))
 
-vline!(p_vv, [0.92, 0.98, 1.02, 1.08]; color=:red, linewidth=1, linestyle=:dash, label="")
-hline!(p_vv, [0.0]; color=:black, linewidth=0.8, linestyle=:dot, label="")
-
-annotate!(p_vv, 0.92, -0.4, text("V = 0.92 pu", :red, :center, 9, rotation=90))
-annotate!(p_vv, 0.98, -0.4, text("V = 0.98 pu", :red, :center, 9, rotation=90))
-annotate!(p_vv, 1.02, 0.30, text("V = 1.02 pu", :red, :center, 9, rotation=90))
-annotate!(p_vv, 1.08, 0.30, text("V = 1.08 pu", :red, :center, 9, rotation=90))
-annotate!(p_vv, 1.00, 0.45, text("Deadband", :gray, :center, 10))
-annotate!(p_vv, 0.87, 0.46, text("Capacitive +0.44", :black, :left, 10))
-annotate!(p_vv, 1.09, -0.55, text("Inductive −0.60", :black, :left, 10))
-
-savefig(p_vv, joinpath(CURVES_DIR, "inverter_voltvar_curve.png"))
-println("Saved $(joinpath(CURVES_DIR, "inverter_voltvar_curve.png"))")
-
-# ------------------------- Volt-Var (STATCOM) -------------------------
-p_statcom = plot(statcom_x, statcom_y;
-    title="STATCOM Volt-Var Response",
-    xlabel="Local voltage (pu)",
-    ylabel="Reactive power (pu of rated, +ve = capacitive)",
-    legend=false,
-    linewidth=2.5, color=:darkgreen,
-    xlims=(0.90, 1.10),
-    ylims=(-1.1, 1.1),
-    grid=true, gridalpha=0.3,
-    size=(800, 500), dpi=200,
-    left_margin=8mm, bottom_margin=6mm)
-
-# Deadband shading
-plot!(p_statcom, [0.98, 1.02, 1.02, 0.98], [-1.1, -1.1, 1.1, 1.1];
-    seriestype=:shape, fillalpha=0.1, fillcolor=:gray, linealpha=0, label="")
-
-vline!(p_statcom, [0.94, 0.98, 1.02, 1.06]; color=:red, linewidth=1, linestyle=:dash, label="")
-hline!(p_statcom, [0.0]; color=:black, linewidth=0.8, linestyle=:dot, label="")
-
-annotate!(p_statcom, 0.94, -0.7, text("V = 0.94 pu", :red, :center, 9, rotation=90))
-annotate!(p_statcom, 0.98, -0.7, text("V = 0.98 pu", :red, :center, 9, rotation=90))
-annotate!(p_statcom, 1.02, 0.7, text("V = 1.02 pu", :red, :center, 9, rotation=90))
-annotate!(p_statcom, 1.06, 0.7, text("V = 1.06 pu", :red, :center, 9, rotation=90))
-annotate!(p_statcom, 1.00, 0.9, text("Deadband", :gray, :center, 10))
-annotate!(p_statcom, 0.905, 0.9, text("Full capacitive", :black, :left, 10))
-annotate!(p_statcom, 1.065, -0.9, text("Full inductive", :black, :left, 10))
-
-savefig(p_statcom, joinpath(CURVES_DIR, "statcom_voltvar_curve.png"))
-println("Saved $(joinpath(CURVES_DIR, "statcom_voltvar_curve.png"))")
-
-# ------------------------- Combined 3-panel -------------------------
-p_combined = plot(p_vw, p_vv, p_statcom; layout=(3, 1), size=(900, 1500), dpi=200)
-savefig(p_combined, joinpath(CURVES_DIR, "inverter_curves_combined.png"))
-println("Saved $(joinpath(CURVES_DIR, "inverter_curves_combined.png"))")
-
-println("\nAll done. Four PNGs in $CURVES_DIR/:")
-println("  inverter_voltwatt_curve.png       (Volt-Watt only)")
-println("  inverter_voltvar_curve.png        (PV inverter Volt-Var only)")
-println("  statcom_voltvar_curve.png         (STATCOM Volt-Var only)")
-println("  inverter_curves_combined.png      (all three stacked — use for thesis methodology figure)")
+println("Saved curve figures (PDF) to $CURVES_DIR")

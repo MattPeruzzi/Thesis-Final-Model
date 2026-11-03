@@ -1,376 +1,385 @@
 # -----------------------------------------------------------------------------
 # Note on AI assistance:
-# An AI assistant (Anthropic's Claude) was used to improve the readability of
-# this code — formatting, comments, variable naming, and structural clean-up.
-# The underlying logic, methodology, and implementation are the author's own.
+# AI assistants (Anthropic's Claude and OpenAI's ChatGPT) were used during the
+# development of this code. The network model, simulation design, choice of
+# cases and control laws, and analysis of the results are the author's own.
+#
+# AI was used to improve readability (formatting, comments, variable names,
+# docstrings and structural clean-up), to help with debugging, and to style
+# figures, including legends, layout and colour-blind-safe palettes. Some of
+# the simpler supporting code was also written with AI assistance to save
+# time, mainly plotting code and small helper functions that read saved
+# outputs and calculate summary values. All AI-assisted code was reviewed,
+# run and checked against the simulation outputs by the author.
 # -----------------------------------------------------------------------------
 
+# -----------------------------------------------------------------------------
+# Per-run analysis. Turns the raw monitor data from run_opendss_simulation into
+# the thesis metrics and writes tidy CSVs. No plotting happens here: every
+# thesis figure is drawn by plot_results.jl from these CSVs, so figures can be
+# restyled without rerunning any simulations.
+#
+# Metrics:
+#   - Customer voltage, phase-to-NEUTRAL (what the customer actually receives),
+#     assessed against AS 61000.3.100 on 10-minute values:
+#       225-244 V for >= 50% of the time, 216-253 V for >= 99% of the time
+#   - IEC VUF = |V2|/|V1|, assessed as the 95th percentile of 10-minute values
+#     (2% limit, AS/NZS IEC 61000.2.2), with the peak also reported
+#   - NEMA line voltage unbalance (LVUR, vuf_nema) from LINE-TO-LINE magnitudes,
+#     which is how NEMA MG-1 defines it. Line voltages contain no zero sequence,
+#     so neutral shift does not appear in it.
+#   - IEEE phase voltage unbalance (PVUR, vuf_pvur) from phase-to-neutral
+#     magnitudes. This one DOES include neutral shift, so it shows the spread of
+#     voltages customers actually see.
+#   - Sequence components |V0|, |V1|, |V2| and the neutral-to-earth voltage |Vn|
+# -----------------------------------------------------------------------------
 
 using DataFrames
 using CSV
 using Statistics
-using Plots
-using Dates
+
+const A_SEQ     = cis(2π / 3)
+const BAND_50   = (225.0, 244.0)   # must hold >= 50% of the time
+const BAND_99   = (216.0, 253.0)   # must hold >= 99% of the time
+const VUF_LIMIT = 2.0              # %, AS/NZS IEC 61000.2.2
+
+
+# ----------------------------------------------------------------------
+# Small helpers
+# ----------------------------------------------------------------------
+phasor(mag, ang_deg) = mag .* cis.(deg2rad.(ang_deg))
+
+iec_vuf(v1::Complex, v2::Complex) = abs(v1) > 1e-3 ? 100 * abs(v2) / abs(v1) : 0.0
+
+function nema_vuf(a::Real, b::Real, c::Real)
+    avg = (a + b + c) / 3
+    avg > 1e-3 || return 0.0
+    return 100 * max(abs(a - avg), abs(b - avg), abs(c - avg)) / avg
+end
+
+"""
+    aggregate_10min(x, k)
+
+Combine every k consecutive samples into one 10-minute value using the RMS of
+the block (k = 2 for 5-minute data), following the IEC 61000-4-30 approach of
+aggregating shorter intervals. An incomplete final block is dropped.
+"""
+function aggregate_10min(x::AbstractVector{<:Real}, k::Int)
+    k <= 1 && return collect(Float64, x)
+    nb = length(x) ÷ k
+    return [sqrt(mean(abs2, @view x[(i - 1) * k + 1 : i * k])) for i in 1:nb]
+end
+
+p95(x) = isempty(x) ? NaN : quantile(x, 0.95)
+
+steps_per_10min(interval_minutes::Int) = max(1, round(Int, 10 / interval_minutes))
+
+
+# ----------------------------------------------------------------------
+# Sequence components and VUF at every LV bus
+# ----------------------------------------------------------------------
+"""
+    compute_sequences(ts, buses)
+
+For each bus, build phase-to-ground phasors Va, Vb, Vc and the neutral Vn from
+the 4-conductor line monitor, then compute the sequence components and VUF.
+V1 and V2 are the same whether voltages are referenced to ground or to the
+neutral; V0 is not, so both versions are kept.
+"""
+function compute_sequences(ts::Dict, buses)
+    out = Dict{String, DataFrame}()
+    a = A_SEQ
+
+    for bus in buses
+        key = "M_VBUS_$(bus)"
+        if !haskey(ts, key)
+            @warn "No monitor data for bus $bus, skipping"
+            continue
+        end
+        df = ts[key]
+        if !all(c -> hasproperty(df, c), (:V1, :V2, :V3, :VAngle1, :VAngle2, :VAngle3))
+            @warn "Bus $bus monitor lacks 3-phase data, skipping"
+            continue
+        end
+
+        va = phasor(df.V1, df.VAngle1)
+        vb = phasor(df.V2, df.VAngle2)
+        vc = phasor(df.V3, df.VAngle3)
+        vn = (hasproperty(df, :V4) && hasproperty(df, :VAngle4)) ?
+             phasor(df.V4, df.VAngle4) : zeros(ComplexF64, nrow(df))
+
+        v0_pg = (va .+ vb .+ vc) ./ 3
+        v1    = (va .+ a .* vb .+ a^2 .* vc) ./ 3
+        v2    = (va .+ a^2 .* vb .+ a .* vc) ./ 3
+        v0_pn = v0_pg .- vn                      # zero sequence seen phase-to-neutral
+
+        out[bus] = DataFrame(
+            timestep    = 1:nrow(df),
+            v0          = abs.(v0_pn),
+            v0_pg       = abs.(v0_pg),
+            v1          = abs.(v1),
+            v2          = abs.(v2),
+            vn          = abs.(vn),
+            vuf_iec     = iec_vuf.(v1, v2),
+            vuf_nema    = nema_vuf.(abs.(va .- vb), abs.(vb .- vc), abs.(vc .- va)),   # line-to-line
+            vuf_pvur    = nema_vuf.(abs.(va .- vn), abs.(vb .- vn), abs.(vc .- vn)),   # phase-to-neutral
+        )
+    end
+    return out
+end
 
 
 """
-    analyse_results(results; output_dir, interval_minutes)
+    summarise_buses(seq, buses, k)
 
-Take the results NamedTuple from run_opendss_simulation and produce
-thesis-quality plots and summary statistics.
+Peak and 95th-percentile (10-minute) VUF per bus, plus mean sequence magnitudes.
 """
-function analyse_results(
-    results;
-    output_dir::AbstractString = "analysis_plots",
-    interval_minutes::Int = 5,
-)
-    mkpath(output_dir)
-
-    # Convert timestep numbers to hours-of-day for nicer plots
-    ts = results.timeseries
-    n_steps = nrow(first(values(ts)))
-    hours = collect(0:n_steps-1) .* (interval_minutes / 60)
-
-    # Slot mapping
-    slot_load_names = ["Ld1", "Ld2", "Ld3", "Ld4", "Ld5", "Ld6", "Ld7", "Ld8",
-                       "Ld9", "Ld10", "Ld11", "Ld12", "Ld13", "Ld14", "Ld15",
-                       "Ld16", "Ld17", "Ld24", "Ld25", "Ld26", "Ld27", "Ld28",
-                       "Ld29", "Ld30", "Ld31"]
-    n_slots = length(slot_load_names)
-
-    # LV bus list for VUF
-    lv_buses = ["TxSecondary", "FN_Trunk",
-                "NorthSpine_1", "NorthSpine_2", "NorthSpine_End",
-                "West_1", "West_2", "West_Junction", "West_End_A", "West_End_B",
-                "East_1", "East_Junction", "East_North_1", "East_North_End",
-                "East_South_1", "East_South_End"]
-
-    # ------------------------------------------------------------------
-    # PLOT 1: Voltage time-series at every load bus
-    # ------------------------------------------------------------------
-    println("Generating plot 1: Voltage time-series across all buses...")
-    p1 = plot(; title="Voltage at all 25 load points across the day",
-              xlabel="Hour of day", ylabel="Voltage (pu)",
-              xlims=(0, 24), xticks=0:3:24,
-              size=(1400, 700), legend=false,
-              dpi=200)
-
-    for ld in slot_load_names
-        df_v = ts["M_V_$ld"]
-        v_pu = df_v.V1 ./ 230
-        plot!(p1, hours, v_pu; alpha=0.5, linewidth=1.0, color=:steelblue)
+function summarise_buses(seq::Dict, buses, k::Int)
+    bs = DataFrame(bus = String[],
+                   peak_iec = Float64[], p95_iec = Float64[],
+                   peak_nema = Float64[], p95_nema = Float64[],
+                   peak_pvur = Float64[], p95_pvur = Float64[],
+                   mean_v0 = Float64[], mean_v2 = Float64[], max_vn = Float64[])
+    for bus in buses
+        haskey(seq, bus) || continue
+        s = seq[bus]
+        push!(bs, (bus,
+                   maximum(s.vuf_iec),     p95(aggregate_10min(s.vuf_iec, k)),
+                   maximum(s.vuf_nema),    p95(aggregate_10min(s.vuf_nema, k)),
+                   maximum(s.vuf_pvur),    p95(aggregate_10min(s.vuf_pvur, k)),
+                   mean(s.v0), mean(s.v2), maximum(s.vn)))
     end
+    return bs
+end
 
-    hline!(p1, [1.10]; color=:red, linewidth=1.5, linestyle=:dash, label="")
-    hline!(p1, [0.90]; color=:red, linewidth=1.5, linestyle=:dash, label="")
-    hline!(p1, [1.00]; color=:black, linewidth=0.8, linestyle=:dot, label="")
-    annotate!(p1, 0.3, 1.10, text("AS 60038 +10%", :red, :left, 9))
-    annotate!(p1, 0.3, 0.90, text("AS 60038 −10%", :red, :left, 9))
 
-    savefig(p1, joinpath(output_dir, "01_voltage_envelope.png"))
-    println("  saved 01_voltage_envelope.png")
+# ----------------------------------------------------------------------
+# Customer voltages (phase-to-neutral) and AS 61000.3.100 compliance
+# ----------------------------------------------------------------------
+"""
+    customer_voltages(ts, loads, k)
 
-    # ------------------------------------------------------------------
-    # PLOT 2: Transformer V-curve (P over the day)
-    # ------------------------------------------------------------------
-    println("Generating plot 2: Transformer power flow (V-curve)...")
-    tx = ts["M_P_Tx"]
+The load monitors record each conductor's voltage to ground, so the customer's
+phase-to-neutral voltage is |V_phase - V_neutral|. Compliance is assessed on
+10-minute values.
+"""
+function customer_voltages(ts::Dict, loads, k::Int)
+    v_ts = DataFrame(timestep = Int[], load = String[], v_pn = Float64[])
+    comp = DataFrame(load = String[], min_v = Float64[], max_v = Float64[], mean_v = Float64[],
+                     frac_225_244 = Float64[], frac_216_253 = Float64[],
+                     pass_50 = Bool[], pass_99 = Bool[])
 
-    s1 = tx[!, Symbol("S1 (kVA)")]
-    a1 = tx[!, :Ang1]
-    s2 = tx[!, Symbol("S2 (kVA)")]
-    a2 = tx[!, :Ang2]
-    has_s3 = "S3 (kVA)" in names(tx)
-    s3 = has_s3 ? tx[!, Symbol("S3 (kVA)")] : zeros(n_steps)
-    a3 = has_s3 ? tx[!, :Ang3] : zeros(n_steps)
-
-    p1_kw = s1 .* cos.(deg2rad.(a1))
-    p2_kw = s2 .* cos.(deg2rad.(a2))
-    p3_kw = s3 .* cos.(deg2rad.(a3))
-    p_total = p1_kw .+ p2_kw .+ p3_kw
-
-    # Flip sign convention: positive = importing from grid, negative = exporting (PV)
-    p1_kw = -p1_kw
-    p2_kw = -p2_kw
-    p3_kw = -p3_kw
-    p_total = -p_total
-
-    p2_plot = plot(hours, p_total;
-        title="Transformer power flow across the day",
-        xlabel="Hour of day", ylabel="Active power (kW)",
-        label="Total P",
-        xlims=(0, 24), xticks=0:3:24,
-        linewidth=2.5, color=:steelblue,
-        size=(1400, 600), dpi=200)
-
-    plot!(p2_plot, hours, p1_kw; label="Phase A", linewidth=1.2, alpha=0.6, color=:red)
-    plot!(p2_plot, hours, p2_kw; label="Phase B", linewidth=1.2, alpha=0.6, color=:green)
-    plot!(p2_plot, hours, p3_kw; label="Phase C", linewidth=1.2, alpha=0.6, color=:blue)
-    hline!(p2_plot, [0]; color=:black, linewidth=0.8, linestyle=:dot, label="")
-    hline!(p2_plot, [200]; color=:red, linewidth=1.0, linestyle=:dash, label="200 kVA rating")
-    hline!(p2_plot, [-200]; color=:red, linewidth=1.0, linestyle=:dash, label="")
-
-    savefig(p2_plot, joinpath(output_dir, "02_transformer_v_curve.png"))
-    println("  saved 02_transformer_v_curve.png")
-
-    # ------------------------------------------------------------------
-    # PLOT 3, 6, 7: VUF analysis (IEC and NEMA methods)
-    # ------------------------------------------------------------------
-    println("Generating VUF analysis (IEC + NEMA)...")
-    vuf = compute_vuf(ts, lv_buses)
-
-    # Plot 3: VUF time-series at every bus (IEC method)
-    p3 = plot(; title="Voltage Unbalance Factor (IEC) at all LV buses across the day",
-              xlabel="Hour of day", ylabel="VUF (%)",
-              xlims=(0, 24), xticks=0:3:24,
-              size=(1400, 700), legend=false, dpi=200)
-
-    for bus in lv_buses
-        if haskey(vuf, bus)
-            plot!(p3, hours, vuf[bus].vuf_iec; alpha=0.5, linewidth=1.0, color=:steelblue)
+    for ld in loads
+        key = "M_V_$(ld)"
+        if !haskey(ts, key)
+            @warn "No voltage monitor for $ld, skipping"
+            continue
         end
+        df = ts[key]
+        va = phasor(df.V1, df.VAngle1)
+        v = (hasproperty(df, :V2) && hasproperty(df, :VAngle2)) ?
+            abs.(va .- phasor(df.V2, df.VAngle2)) : abs.(va)
+
+        append!(v_ts, DataFrame(timestep = 1:length(v), load = fill(ld, length(v)), v_pn = v))
+
+        v10 = aggregate_10min(v, k)
+        f50 = mean(BAND_50[1] .<= v10 .<= BAND_50[2])
+        f99 = mean(BAND_99[1] .<= v10 .<= BAND_99[2])
+        push!(comp, (ld, minimum(v), maximum(v), mean(v), f50, f99, f50 >= 0.50, f99 >= 0.99))
     end
-    hline!(p3, [2.0]; color=:red, linewidth=1.5, linestyle=:dash, label="")
-    annotate!(p3, 0.3, 2.0, text("AS 60038 limit (2%)", :red, :left, 9))
-    savefig(p3, joinpath(output_dir, "03_vuf_iec_timeseries.png"))
-    println("  saved 03_vuf_iec_timeseries.png")
+    return v_ts, comp
+end
 
-    # Plot 6: NEMA VUF time-series
-    p6 = plot(; title="Voltage Unbalance (NEMA) at all LV buses across the day",
-              xlabel="Hour of day", ylabel="NEMA Unbalance (%)",
-              xlims=(0, 24), xticks=0:3:24,
-              size=(1400, 700), legend=false, dpi=200)
 
-    for bus in lv_buses
-        if haskey(vuf, bus)
-            plot!(p6, hours, vuf[bus].vuf_nema; alpha=0.5, linewidth=1.0, color=:goldenrod)
-        end
-    end
-    hline!(p6, [2.0]; color=:red, linewidth=1.5, linestyle=:dash, label="")
-    savefig(p6, joinpath(output_dir, "06_vuf_nema_timeseries.png"))
-    println("  saved 06_vuf_nema_timeseries.png")
-
-    # Plot 7: Peak VUF per bus, both methods
-    peak_data = DataFrame(bus = String[], peak_vuf_iec = Float64[], peak_vuf_nema = Float64[])
-    for bus in lv_buses
-        if haskey(vuf, bus)
-            push!(peak_data, (bus,
-                round(maximum(vuf[bus].vuf_iec), digits=3),
-                round(maximum(vuf[bus].vuf_nema), digits=3)))
-        end
-    end
-
-    n_buses = nrow(peak_data)
-    bus_x = 1:n_buses
-    p7 = plot(; title="Peak VUF per bus (IEC vs NEMA)",
-              xlabel="Bus", ylabel="Peak VUF (%)",
-              xticks=(bus_x, peak_data.bus),
-              size=(1400, 600), dpi=200,
-              xrotation=45, legend=:topleft)
-    bar!(p7, bus_x .- 0.2, peak_data.peak_vuf_iec;
-         label="IEC", color=:steelblue, alpha=0.8, bar_width=0.4)
-    bar!(p7, bus_x .+ 0.2, peak_data.peak_vuf_nema;
-         label="NEMA", color=:goldenrod, alpha=0.8, bar_width=0.4)
-    hline!(p7, [2.0]; color=:red, linewidth=1.5, linestyle=:dash, label="2% limit")
-    savefig(p7, joinpath(output_dir, "07_peak_vuf_per_bus.png"))
-
-    CSV.write(joinpath(output_dir, "vuf_per_bus.csv"), peak_data)
-    println("  saved 07_peak_vuf_per_bus.png")
-    println("  saved vuf_per_bus.csv")
-
-    # ------------------------------------------------------------------
-    # PLOT 8: STATCOM reactive power output (only if this run had any)
-    # ------------------------------------------------------------------
-    if !isempty(results.statcom_names)
-        println("Generating plot 8: STATCOM reactive power output...")
-        p8 = plot(; title="STATCOM reactive power output across the day",
-                  xlabel="Hour of day", ylabel="Q (kvar)",
-                  xlims=(0, 24), xticks=0:3:24, size=(1400, 600), dpi=200)
-        for name in results.statcom_names
-            df_q = ts["M_Q_$(name)"]
-            q_kvar = df_q[!, Symbol("S1 (kVA)")] .* sin.(deg2rad.(df_q.Ang1))
-            plot!(p8, hours, q_kvar; label=name, linewidth=1.5)
-        end
-        savefig(p8, joinpath(output_dir, "08_statcom_reactive_output.png"))
-        println("  saved 08_statcom_reactive_output.png")
-    end
-
-    # ------------------------------------------------------------------
-    # PLOT 4: Voltage compliance % at each bus
-    # ------------------------------------------------------------------
-    println("Generating plot 4: Voltage compliance per bus...")
-
-    compliance_data = DataFrame(
-        load = String[],
-        min_pu = Float64[],
-        max_pu = Float64[],
-        mean_pu = Float64[],
-        pct_within_band = Float64[],
-        pct_under = Float64[],
-        pct_over = Float64[],
-    )
-
-    for ld in slot_load_names
-        df_v = ts["M_V_$ld"]
-        v_pu = df_v.V1 ./ 230
-        in_band = (0.90 .<= v_pu .<= 1.10)
-        under = v_pu .< 0.90
-        over = v_pu .> 1.10
-        push!(compliance_data, (
-            ld,
-            round(minimum(v_pu), digits=3),
-            round(maximum(v_pu), digits=3),
-            round(mean(v_pu), digits=3),
-            round(100 * sum(in_band) / length(v_pu), digits=2),
-            round(100 * sum(under) / length(v_pu), digits=2),
-            round(100 * sum(over) / length(v_pu), digits=2),
-        ))
-    end
-
-    CSV.write(joinpath(output_dir, "voltage_compliance_per_bus.csv"), compliance_data)
-    println("  saved voltage_compliance_per_bus.csv")
-
-    p4 = bar(compliance_data.load, compliance_data.pct_within_band;
-        title="Voltage compliance per load (% of timesteps within 0.9-1.1 pu)",
-        xlabel="Load", ylabel="% within compliance band",
-        ylims=(0, 105),
-        rotation=45,
-        size=(1400, 600), dpi=200,
-        legend=false,
-        color=:steelblue)
-    hline!(p4, [100]; color=:black, linewidth=0.8, linestyle=:dot, label="")
-    savefig(p4, joinpath(output_dir, "04_compliance_per_bus.png"))
-    println("  saved 04_compliance_per_bus.png")
-
-    # ------------------------------------------------------------------
-    # PLOT 5: Self-consumption per slot
-    # ------------------------------------------------------------------
-    println("Generating plot 5: Self-consumption per slot...")
-
-    sc_data = DataFrame(
-        slot = Int[],
-        load_name = String[],
-        load_kWh = Float64[],
-        pv_kWh = Float64[],
-        self_consumption_pct = Float64[],
-    )
-
-    dt_hr = interval_minutes / 60
-
-    for slot in 1:n_slots
-        ld_name = slot_load_names[slot]
-        df_v = ts["M_V_$ld_name"]
-        df_pv = ts["M_P_PV$slot"]
-
-        # Load real power
-        v_mag = df_v.V1
-        i_mag = df_v.I1
-        v_ang = df_v.VAngle1
-        i_ang = df_v.IAngle1
-        load_kW = v_mag .* i_mag .* cos.(deg2rad.(v_ang .- i_ang)) ./ 1000
-
-        # PV power
-        pv_s = df_pv[!, Symbol("S1 (kVA)")]
-        pv_a = df_pv[!, :Ang1]
-        pv_kW = abs.(pv_s .* cos.(deg2rad.(pv_a)))
-
-        used_locally = min.(pv_kW, max.(load_kW, 0))
-        load_kWh = sum(max.(load_kW, 0)) * dt_hr
-        pv_kWh = sum(pv_kW) * dt_hr
-        used_kWh = sum(used_locally) * dt_hr
-
-        sc_pct = pv_kWh > 0 ? 100 * used_kWh / pv_kWh : 0.0
-
-        push!(sc_data, (slot, ld_name, round(load_kWh, digits=2), round(pv_kWh, digits=2), round(sc_pct, digits=1)))
-    end
-
-    CSV.write(joinpath(output_dir, "self_consumption_per_slot.csv"), sc_data)
-    println("  saved self_consumption_per_slot.csv")
-
-    p5 = bar(sc_data.load_name, sc_data.self_consumption_pct;
-        title="Self-consumption ratio per slot (% of PV used locally)",
-        xlabel="Load slot", ylabel="Self-consumption (%)",
-        ylims=(0, 100),
-        rotation=45,
-        size=(1400, 600), dpi=200,
-        legend=false,
-        color=:goldenrod)
-    savefig(p5, joinpath(output_dir, "05_self_consumption_per_slot.png"))
-    println("  saved 05_self_consumption_per_slot.png")
-
-    println("\nAll analysis outputs written to: $output_dir")
-
+# ----------------------------------------------------------------------
+# Feeder-level headline numbers
+# ----------------------------------------------------------------------
+function feeder_metrics(bs::DataFrame, cc::DataFrame)
+    i = argmax(bs.p95_iec)
     return (
-        compliance = compliance_data,
-        self_consumption = sc_data,
-        vuf = vuf,
-        peak_vuf = peak_data,
+        peak_iec          = maximum(bs.peak_iec),
+        p95_iec           = bs.p95_iec[i],            # worst bus
+        worst_bus         = bs.bus[i],
+        peak_nema         = maximum(bs.peak_nema),
+        p95_nema          = maximum(bs.p95_nema),
+        peak_pvur         = maximum(bs.peak_pvur),
+        p95_pvur          = maximum(bs.p95_pvur),
+        vuf_compliant     = bs.p95_iec[i] <= VUF_LIMIT,
+        min_v             = minimum(cc.min_v),
+        max_v             = maximum(cc.max_v),
+        n_pass_50         = count(cc.pass_50),
+        n_pass_99         = count(cc.pass_99),
+        voltage_compliant = all(cc.pass_50) && all(cc.pass_99),
     )
 end
 
 
 """
-    compute_vuf(ts, lv_buses)
+    compute_metrics(results; interval_minutes = 5)
 
-Compute Voltage Unbalance Factor (VUF) at each bus using two methods:
-- IEEE/IEC: |V_negative_seq| / |V_positive_seq| × 100%
-- NEMA:    max|V_phase - V_avg| / V_avg × 100%
+Everything the thesis needs from one run, without writing any files. Used
+directly by the Monte Carlo loop, and by analyse_results for the base runs.
 """
-function compute_vuf(ts::Dict, lv_buses::Vector{String})
-    vuf_results = Dict{String, DataFrame}()
+function compute_metrics(results; interval_minutes::Int = 5)
+    ts = results.timeseries
+    k  = steps_per_10min(interval_minutes)
 
-    for bus in lv_buses
-        m_name = "M_VBUS_$(bus)"
-        if !haskey(ts, m_name)
-            @warn "No monitor data for bus $bus — skipping VUF"
-            continue
-        end
+    seq         = compute_sequences(ts, LV_BUSES)
+    bus_summary = summarise_buses(seq, LV_BUSES, k)
+    v_ts, comp  = customer_voltages(ts, SLOT_LOAD_NAMES, k)
 
-        df_v = ts[m_name]
-        n = nrow(df_v)
+    return (
+        sequences           = seq,
+        bus_summary         = bus_summary,
+        customer_ts         = v_ts,
+        customer_compliance = comp,
+        feeder              = feeder_metrics(bus_summary, comp),
+    )
+end
 
-        # Need 3-phase data (V1/V2/V3 + their angles)
-        required_cols = [:V1, :V2, :V3, :VAngle1, :VAngle2, :VAngle3]
-        if !all(c -> hasproperty(df_v, c), required_cols)
-            @warn "Bus $bus monitor lacks 3-phase data — skipping"
-            continue
-        end
 
-        vuf_iec = zeros(Float64, n)
-        vuf_nema = zeros(Float64, n)
+"""
+    mc_record(m, case_id, seed; runtime_s)
 
-        for t in 1:n
-            va_mag = df_v.V1[t]
-            vb_mag = df_v.V2[t]
-            vc_mag = df_v.V3[t]
-            va_ang = deg2rad(df_v.VAngle1[t])
-            vb_ang = deg2rad(df_v.VAngle2[t])
-            vc_ang = deg2rad(df_v.VAngle3[t])
+One feeder-level row and a per-bus table for the Monte Carlo CSVs.
+"""
+function mc_record(m, case_id::Symbol, seed::Int; runtime_s::Real = NaN)
+    feeder = merge((case = String(case_id), seed = seed), m.feeder, (runtime_s = Float64(runtime_s),))
+    bus = select(m.bus_summary, :bus, :peak_iec, :p95_iec, :peak_nema, :p95_nema)
+    insertcols!(bus, 1, :case => fill(String(case_id), nrow(bus)), :seed => fill(seed, nrow(bus)))
+    return feeder, bus
+end
 
-            Va = va_mag * exp(im * va_ang)
-            Vb = vb_mag * exp(im * vb_ang)
-            Vc = vc_mag * exp(im * vc_ang)
 
-            # Symmetrical components: a = e^(j*120°)
-            a = exp(im * 2π / 3)
-            V1_seq = (Va + a*Vb + a^2*Vc) / 3   # positive sequence
-            V2_seq = (Va + a^2*Vb + a*Vc) / 3   # negative sequence
+# ----------------------------------------------------------------------
+# Extra outputs used only for the base-case figures
+# ----------------------------------------------------------------------
+"""
+    statcom_reactive(results, interval_minutes)
 
-            # IEC VUF
-            vuf_iec[t] = abs(V1_seq) > 1e-3 ? 100 * abs(V2_seq) / abs(V1_seq) : 0.0
+Reactive output of each STATCOM unit from its power monitor. OpenDSS monitors
+report power flowing INTO the element, so the sign is flipped to make
++ve = injecting (capacitive). For NSC runs this is checked against the
+setpoints the controller actually wrote.
+"""
+function statcom_reactive(results, interval_minutes::Int)
+    ts = results.timeseries
+    out = DataFrame(timestep = Int[], hour = Float64[], unit = String[],
+                    q_kvar = Float64[], q_setpoint = Float64[])
 
-            # NEMA VUF
-            v_avg = (va_mag + vb_mag + vc_mag) / 3
-            max_dev = maximum(abs.([va_mag, vb_mag, vc_mag] .- v_avg))
-            vuf_nema[t] = v_avg > 1e-3 ? 100 * max_dev / v_avg : 0.0
-        end
-
-        vuf_results[bus] = DataFrame(
-            timestep = 1:n,
-            vuf_iec = vuf_iec,
-            vuf_nema = vuf_nema,
-        )
+    for (j, name) in enumerate(results.statcom_names)
+        key = "M_Q_$(name)"
+        haskey(ts, key) || continue
+        m = ts[key]
+        q = -(m[!, Symbol("S1 (kVA)")] .* sind.(m.Ang1))
+        n = length(q)
+        sp = size(results.statcom_q, 1) >= n ? results.statcom_q[1:n, j] : fill(NaN, n)
+        append!(out, DataFrame(timestep = 1:n, hour = (0:n-1) .* (interval_minutes / 60),
+                               unit = fill(name, n), q_kvar = q, q_setpoint = sp))
     end
 
-    return vuf_results
+    if results.statcom_control == :nsc && nrow(out) > 0
+        err = maximum(abs.(out.q_kvar .- out.q_setpoint))
+        println("  STATCOM sign check (NSC): max |monitor Q - setpoint| = $(round(err, digits=2)) kvar")
+        # A sign error would make the gap about twice the setpoint; small gaps are
+        # just the unit's actual output differing slightly from its setpoint
+        qmax = maximum(abs.(out.q_setpoint))
+        err > max(2.0, 0.5 * qmax) && @warn "Monitor Q and NSC setpoints disagree. If they are equal and opposite, remove the minus sign in statcom_reactive()."
+    end
+    return out
+end
+
+
+"""
+    transformer_power(ts, interval_minutes)
+
+Per-phase active power at the transformer secondary (+ve = importing from grid).
+"""
+function transformer_power(ts::Dict, interval_minutes::Int)
+    tx = ts["M_P_Tx"]
+    n = nrow(tx)
+    p(col_s, col_a) = -(tx[!, Symbol(col_s)] .* cosd.(tx[!, col_a]))
+    pa = p("S1 (kVA)", :Ang1)
+    pb = p("S2 (kVA)", :Ang2)
+    pc = "S3 (kVA)" in names(tx) ? p("S3 (kVA)", :Ang3) : zeros(n)
+    return DataFrame(timestep = 1:n, hour = (0:n-1) .* (interval_minutes / 60),
+                     p_a = pa, p_b = pb, p_c = pc, p_total = pa .+ pb .+ pc)
+end
+
+
+"""
+    self_consumption(ts, interval_minutes)
+
+Share of each slot's PV used locally over the simulated period.
+"""
+function self_consumption(ts::Dict, interval_minutes::Int)
+    sc = DataFrame(slot = Int[], load_name = String[], load_kWh = Float64[],
+                   pv_kWh = Float64[], self_consumption_pct = Float64[])
+    dt_hr = interval_minutes / 60
+
+    for (slot, ld) in enumerate(SLOT_LOAD_NAMES)
+        df_v  = ts["M_V_$ld"]
+        df_pv = ts["M_P_PV$slot"]
+        load_kW = df_v.V1 .* df_v.I1 .* cosd.(df_v.VAngle1 .- df_v.IAngle1) ./ 1000
+        pv_kW   = abs.(df_pv[!, Symbol("S1 (kVA)")] .* cosd.(df_pv.Ang1))
+
+        used     = min.(pv_kW, max.(load_kW, 0))
+        load_kWh = sum(max.(load_kW, 0)) * dt_hr
+        pv_kWh   = sum(pv_kW) * dt_hr
+        sc_pct   = pv_kWh > 0 ? 100 * sum(used) * dt_hr / pv_kWh : 0.0
+        push!(sc, (slot, ld, load_kWh, pv_kWh, sc_pct))
+    end
+    return sc
+end
+
+
+# ----------------------------------------------------------------------
+# Main entry point for the base (single-seed) runs
+# ----------------------------------------------------------------------
+"""
+    analyse_results(results; output_dir, interval_minutes = 5)
+
+Compute all metrics for one run and write them as CSVs in `output_dir`:
+  bus_timeseries.csv               VUF and sequence magnitudes, every bus and step
+  bus_summary.csv                  peak / P95 VUF and mean sequence magnitudes per bus
+  customer_voltage_timeseries.csv  phase-to-neutral voltage, every load and step
+  customer_compliance.csv          AS 61000.3.100 compliance per load
+  feeder_summary.csv               headline numbers for the run
+  statcom_q.csv                    STATCOM reactive output (STATCOM cases only)
+  transformer_power.csv            per-phase transformer power
+  self_consumption.csv             per-slot PV self-consumption
+"""
+function analyse_results(results; output_dir::AbstractString, interval_minutes::Int = 5)
+    mkpath(output_dir)
+    m = compute_metrics(results; interval_minutes = interval_minutes)
+    to_hour(t) = (t - 1) * interval_minutes / 60
+
+    bus_ts = vcat([insertcols!(copy(m.sequences[b]), 1, :bus => fill(b, nrow(m.sequences[b])))
+                   for b in LV_BUSES if haskey(m.sequences, b)]...)
+    bus_ts.hour = to_hour.(bus_ts.timestep)
+
+    cust_ts = copy(m.customer_ts)
+    cust_ts.hour = to_hour.(cust_ts.timestep)
+
+    q  = statcom_reactive(results, interval_minutes)
+    tx = transformer_power(results.timeseries, interval_minutes)
+    sc = self_consumption(results.timeseries, interval_minutes)
+
+    CSV.write(joinpath(output_dir, "bus_timeseries.csv"), bus_ts)
+    CSV.write(joinpath(output_dir, "bus_summary.csv"), m.bus_summary)
+    CSV.write(joinpath(output_dir, "customer_voltage_timeseries.csv"), cust_ts)
+    CSV.write(joinpath(output_dir, "customer_compliance.csv"), m.customer_compliance)
+    CSV.write(joinpath(output_dir, "feeder_summary.csv"), DataFrame([m.feeder]))
+    nrow(q) > 0 && CSV.write(joinpath(output_dir, "statcom_q.csv"), q)
+    CSV.write(joinpath(output_dir, "transformer_power.csv"), tx)
+    CSV.write(joinpath(output_dir, "self_consumption.csv"), sc)
+
+    f = m.feeder
+    println("  P95 VUF (worst bus $(f.worst_bus)): $(round(f.p95_iec, digits=3))%   " *
+            "peak VUF: $(round(f.peak_iec, digits=3))%   " *
+            "customer V: $(round(f.min_v, digits=1))-$(round(f.max_v, digits=1)) V   " *
+            "voltage compliant: $(f.voltage_compliant)")
+    println("  Analysis written to $output_dir")
+
+    return merge(m, (statcom_q = q, transformer = tx, self_consumption = sc))
 end

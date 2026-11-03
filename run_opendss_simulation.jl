@@ -1,9 +1,18 @@
 # -----------------------------------------------------------------------------
 # Note on AI assistance:
-# An AI assistant (Anthropic's Claude) was used to improve the readability of
-# this code — formatting, comments, variable naming, and structural clean-up.
-# The underlying logic, methodology, and implementation are the author's own.
+# AI assistants (Anthropic's Claude and OpenAI's ChatGPT) were used during the
+# development of this code. The network model, simulation design, choice of
+# cases and control laws, and analysis of the results are the author's own.
+#
+# AI was used to improve readability (formatting, comments, variable names,
+# docstrings and structural clean-up), to help with debugging, and to style
+# figures, including legends, layout and colour-blind-safe palettes. Some of
+# the simpler supporting code was also written with AI assistance to save
+# time, mainly plotting code and small helper functions that read saved
+# outputs and calculate summary values. All AI-assisted code was reviewed,
+# run and checked against the simulation outputs by the author.
 # -----------------------------------------------------------------------------
+
 
 using OpenDSSDirect
 using DataFrames
@@ -22,6 +31,12 @@ const LV_BUSES = ["TxSecondary", "FN_Trunk",
                   "West_1", "West_2", "West_Junction", "West_End_A", "West_End_B",
                   "East_1", "East_Junction", "East_North_1", "East_North_End",
                   "East_South_1", "East_South_End"]
+
+# The 25 single-phase load slots (names kept from the original network)
+const SLOT_LOAD_NAMES = ["Ld1", "Ld2", "Ld3", "Ld4", "Ld5", "Ld6", "Ld7", "Ld8",
+                         "Ld9", "Ld10", "Ld11", "Ld12", "Ld13", "Ld14", "Ld15",
+                         "Ld16", "Ld17", "Ld24", "Ld25", "Ld26", "Ld27", "Ld28",
+                         "Ld29", "Ld30", "Ld31"]
 
 # Each bus is monitored via the line that terminates at it.
 const BUS_TO_LINE = Dict(
@@ -54,57 +69,87 @@ simulation, and return time-series + snapshot results.
 # Arguments
 - `consumers::Vector{Consumer}` — consumer objects from load_consumer_profiles.jl
 - `network_file::String` — path to LVNetwork.dss
-- `mode::Symbol` — `:daily` (one day) or `:yearly` (full year)
+- `mode::Symbol` — `:daily` (a window of whole days, set by start_day/n_days) or
+                   `:yearly` (the whole dataset)
+- `start_day::Int` — first day of 2019 to simulate (1 = 1 January)
+- `n_days::Int` — number of consecutive days to simulate (e.g. 7 for a week)
 - `interval_minutes::Int` — time resolution of the data (default 5)
 - `transformer_kVA::Float64` — transformer rating (default 200)
+- `tap::Float64` — off-load tap on the LV winding in pu (1.0 = nominal 400 V,
+                   1.025 = +2.5%, 1.05 = +5%); fixed for the whole run
 - `seed::Int` — RNG seed for reproducible consumer-to-slot assignment
-- `pv_mode::Symbol` — `:dumb` (PV as negative load, no inverter response)
-                      or `:smart` (PVSystem with AS/NZS 4777.2:2020 control)
+- `allocation::Symbol` — `:all` (every consumer used, dealt round-robin into the
+                         25 slots, so 2-3 households per connection point) or
+                         `:single` (one household per slot)
+- `pv_mode::Symbol` — `:dumb` (PV as negative load, no inverter response),
+                      `:smart` (PVSystem with AS/NZS 4777.2:2020 control), or
+                      `:smart_unity` (PVSystem at unity pf, no Volt-Var/Volt-Watt;
+                      diagnostic only, to isolate inverter/STATCOM interaction)
 - `statcom_scenario::Symbol` — STATCOM placement (`:none`, `:A_end`, `:B_junction`, `:C_decentralised`)
 - `statcom_kva_budget::Float64` — total STATCOM kVA split across the scenario's units (default 75)
+- `statcom_control::Symbol` — `:voltvar` (per-phase Volt-Var InvControl) or `:nsc`
+                              (coordinated negative-sequence compensation)
+- `nsc_objective_buses` — buses whose negative-sequence voltage `:nsc` minimises
 - `output_dir::String` — where to save result CSVs
+- `write_files::Bool` — write raw monitor CSVs to disk (set false for Monte Carlo runs)
 
 # Returns
-NamedTuple: (voltages, summary, timeseries, pv_mode, statcom_scenario, statcom_names)
+NamedTuple: (voltages, summary, timeseries, pv_mode, statcom_scenario,
+            statcom_control, statcom_names, statcom_q)
 """
 function run_opendss_simulation(
     consumers::Vector{Consumer};
     network_file::AbstractString = "LVNetwork.dss",
     mode::Symbol = :daily,
+    start_day::Int = 1,
+    n_days::Int = 1,
     interval_minutes::Int = 5,
     transformer_kVA::Float64 = 200.0,
+    tap::Float64 = 1.0,
     seed::Int = 42,
+    allocation::Symbol = :all,
     pv_mode::Symbol = :smart,
     statcom_scenario::Symbol = :none,
     statcom_kva_budget::Float64 = 75.0,
+    statcom_control::Symbol = :voltvar,
+    nsc_objective_buses = LV_BUSES,
     output_dir::AbstractString = "opendss_results",
+    write_files::Bool = true,
 )
-    @assert pv_mode in (:dumb, :smart) "pv_mode must be :dumb or :smart"
-    mkpath(output_dir)
+    @assert pv_mode in (:dumb, :smart, :smart_unity) "pv_mode must be :dumb, :smart or :smart_unity"
+    write_files && mkpath(output_dir)
 
     println("PV mode: $pv_mode")
 
     # ------------------------------------------------------------------
     # Define the 25 North-feeder load slots and assign consumers
     # ------------------------------------------------------------------
-    slot_load_names = ["Ld1", "Ld2", "Ld3", "Ld4", "Ld5", "Ld6", "Ld7", "Ld8",
-                       "Ld9", "Ld10", "Ld11", "Ld12", "Ld13", "Ld14", "Ld15",
-                       "Ld16", "Ld17", "Ld24", "Ld25", "Ld26", "Ld27", "Ld28",
-                       "Ld29", "Ld30", "Ld31"]
+    slot_load_names = SLOT_LOAD_NAMES
     n_slots = length(slot_load_names)
     n_consumers = length(consumers)
 
+    @assert allocation in (:all, :single) "allocation must be :all or :single"
+    @assert n_consumers >= n_slots "Need at least $n_slots consumers, have $n_consumers"
     rng = MersenneTwister(seed)
-    shuffled_indices = shuffle(rng, 1:n_consumers)
+    shuffled = shuffle(rng, 1:n_consumers)
 
-    slot_assignments = [Int[] for _ in 1:n_slots]
-    for (i, ci) in enumerate(shuffled_indices)
-        slot = ((i - 1) % n_slots) + 1
-        push!(slot_assignments[slot], ci)
+    if allocation == :all
+        # Every consumer is used. The shuffled pool is dealt round-robin into the
+        # slots, so each connection point serves 2-3 households (summed), as at a
+        # pole or pit feeding several dwellings. The seed changes who shares a slot
+        # and which phase they land on.
+        slot_assignments = [Int[] for _ in 1:n_slots]
+        for (i, ci) in enumerate(shuffled)
+            push!(slot_assignments[mod1(i, n_slots)], ci)
+        end
+    else
+        # One household per connection point
+        slot_assignments = [[ci] for ci in shuffled[1:n_slots]]
     end
 
     counts = length.(slot_assignments)
-    println("Consumer-to-slot assignment: $(minimum(counts))–$(maximum(counts)) consumers per slot (mean $(round(mean(counts), digits=1)))")
+    println("Consumer-to-slot assignment: $(minimum(counts))-$(maximum(counts)) households per slot " *
+            "($(sum(counts)) of $n_consumers consumers used, seed $seed)")
 
     # ------------------------------------------------------------------
     # Determine simulation horizon
@@ -113,23 +158,37 @@ function run_opendss_simulation(
     npts_total = nrow(first_df)
     sinterval_seconds = interval_minutes * 60
 
-    npts_to_use = mode == :daily ?
-        min(round(Int, 24 * 60 / interval_minutes), npts_total) :
-        npts_total
+    steps_per_day = round(Int, 24 * 60 / interval_minutes)
+    if mode == :daily
+        offset      = (start_day - 1) * steps_per_day
+        npts_to_use = n_days * steps_per_day
+        @assert start_day >= 1 && offset + npts_to_use <= npts_total "Days $start_day to $(start_day + n_days - 1) run past the end of the data"
+    else
+        offset      = 0
+        npts_to_use = npts_total
+    end
+    window = (offset + 1):(offset + npts_to_use)
 
-    println("Simulation mode: $mode  ($(npts_to_use) timesteps at $(interval_minutes)-min resolution)")
+    # Daily mode is built around a 24 h clock, so to be safe anything longer than
+    # one day runs in yearly mode (same solver; the clock just keeps counting)
+    use_yearly = mode == :yearly || n_days > 1
+
+    println("Simulation window: day $(offset ÷ steps_per_day + 1), $(npts_to_use ÷ steps_per_day) day(s), " *
+            "$(npts_to_use) timesteps at $(interval_minutes)-min resolution")
 
     # ------------------------------------------------------------------
     # Build aggregated load and PV profiles per slot
     # ------------------------------------------------------------------
     aggregated_load = zeros(Float64, npts_to_use, n_slots)
     aggregated_pv   = zeros(Float64, npts_to_use, n_slots)
+    pv_rating_kW    = zeros(Float64, n_slots)   # full-year peak, so inverter size doesn't depend on the window
 
     for slot in 1:n_slots
         for ci in slot_assignments[slot]
             df = consumers[ci].PV_profile
-            aggregated_load[:, slot] .+= Float64.(df.total_load[1:npts_to_use])
-            aggregated_pv[:, slot]   .+= max.(Float64.(df.pv_generation[1:npts_to_use]), 0.0)
+            aggregated_load[:, slot] .+= Float64.(df.total_load[window])
+            aggregated_pv[:, slot]   .+= max.(Float64.(df.pv_generation[window]), 0.0)
+            pv_rating_kW[slot]       += maximum(max.(Float64.(df.pv_generation), 0.0))
         end
     end
 
@@ -146,10 +205,15 @@ function run_opendss_simulation(
     dss("Edit Transformer.DistTx kVAs=[$(transformer_kVA) $(transformer_kVA)]")
     println("Transformer set to $(transformer_kVA) kVA")
 
+    # Off-load tap on the LV winding. Real distribution transformers are set a
+    # few percent high to leave room for voltage drop along the feeder.
+    dss("Edit Transformer.DistTx wdg=2 tap=$(tap)")
+    println("Transformer LV tap set to $(tap) pu ($(round(Int, 230 * tap)) V phase-to-neutral at no load)")
+
     # ------------------------------------------------------------------
     # Inject loadshapes, update each load, and add PV elements
     # ------------------------------------------------------------------
-    daily_or_yearly = mode == :daily ? "daily" : "yearly"
+    daily_or_yearly = use_yearly ? "yearly" : "daily"
 
     for slot in 1:n_slots
         load_name = slot_load_names[slot]
@@ -157,7 +221,7 @@ function run_opendss_simulation(
         pv_data   = aggregated_pv[:, slot]
 
         peak_load_kW = max(maximum(load_data), 1e-3)
-        peak_pv_kW   = max(maximum(pv_data),   1e-3)
+        peak_pv_kW   = max(pv_rating_kW[slot], 1e-3)   # system rating = household's full-year peak
 
         # Per-unit loadshape multipliers
         load_pu = load_data ./ peak_load_kW
@@ -204,15 +268,20 @@ function run_opendss_simulation(
     # Define inverter control curves (smart mode only)
     # ------------------------------------------------------------------
     if pv_mode == :smart
-        # Volt-Watt curve: full power below 1.06 pu, ramping to 20% at 1.10 pu
+        # DERList is left empty on purpose: in this OpenDSS version an empty
+        # DERList resolves to PVSystems only, so the STATCOM Storage units are
+        # not also driven by this controller.
+
+        # Volt-Watt (AS/NZS 4777.2:2020 Australia A): 100% up to 253 V, 20% at 260 V
         dss("New XYCurve.VW_Curve npts=4 " *
-            "Xarray=[0.0, 1.06, 1.10, 2.0] " *
+            "Xarray=[0.0, 1.1000, 1.1304, 2.0] " *
             "Yarray=[1.0, 1.0, 0.20, 0.20]")
 
-        # Volt-Var curve: capacitive below 0.98, deadband 0.98-1.02, inductive above 1.02
-        dss("New XYCurve.VV_Curve npts=4 " *
-            "Xarray=[0.92, 0.98, 1.02, 1.08] " *
-            "Yarray=[0.44, 0.0, 0.0, -0.60]")
+        # Volt-Var (AS/NZS 4777.2:2020 Australia A): 207/220/240/258 V, +44% / -60%
+        # Flat end points hold the output at its limits outside 207-258 V
+        dss("New XYCurve.VV_Curve npts=6 " *
+            "Xarray=[0.50, 0.9000, 0.9565, 1.0435, 1.1217, 1.50] " *
+            "Yarray=[0.44, 0.44, 0.0, 0.0, -0.60, -0.60]")
 
         # InvControl applies both curves to all PVSystems
         dss("New InvControl.InvCtrl mode=VOLTVAR voltage_curvex_ref=rated " *
@@ -223,7 +292,8 @@ function run_opendss_simulation(
         println("Applied AS/NZS 4777.2:2020 Volt-Watt + Volt-Var control")
     end
 
-    statcom_names = add_statcom_scenario!(statcom_scenario; total_kva_budget = statcom_kva_budget)
+    statcom_names = add_statcom_scenario!(statcom_scenario;
+        total_kva_budget = statcom_kva_budget, control = statcom_control)
 
 
     # ------------------------------------------------------------------
@@ -265,34 +335,34 @@ function run_opendss_simulation(
     # ------------------------------------------------------------------
     # Configure and solve
     # ------------------------------------------------------------------
-    Solution.Mode(mode == :daily ? 1 : 2)
-    Solution.Number(npts_to_use)
+    Solution.Mode(use_yearly ? 2 : 1)
+    Solution.Number(1)
     Solution.StepSize(Float64(sinterval_seconds))
-    Solution.Hour(0.0)
-    Solution.Seconds(0.0)
 
-    dss("Set MaxControlIter=100")
+    max_control_iter = 100
+    dss("Set MaxControlIter=$(max_control_iter)")
+
+    unit_kva = isempty(statcom_names) ? 0.0 : statcom_kva_budget / length(statcom_names)
 
     println("Solving...")
-    Solution.Solve()
-
-    if !Solution.Converged()
-        @warn "Solution did not converge!"
-    else
-        println("Solution converged ✓")
-    end
+    statcom_q = step_timeseries!(npts_to_use, Float64(sinterval_seconds);
+        statcom_names = statcom_names,
+        control = statcom_control,
+        objective_buses = nsc_objective_buses,
+        kvar_max = unit_kva,
+        max_control_iter = max_control_iter)
 
     # ------------------------------------------------------------------
     # Save monitor data
     # ------------------------------------------------------------------
-    println("Saving monitor data...")
     dss("Save Monitors")
 
     # ------------------------------------------------------------------
     # Collect results
     # ------------------------------------------------------------------
     base_results = collect_results(output_dir;
-        slot_load_names = slot_load_names, n_slots = n_slots, statcom_names = statcom_names)
+        slot_load_names = slot_load_names, n_slots = n_slots, statcom_names = statcom_names,
+        write_files = write_files)
 
     return (
         voltages = base_results.voltages,
@@ -300,7 +370,13 @@ function run_opendss_simulation(
         timeseries = base_results.timeseries,
         pv_mode = pv_mode,
         statcom_scenario = statcom_scenario,
+        statcom_control = statcom_control,
         statcom_names = statcom_names,
+        statcom_q = statcom_q,
+        start_day = offset ÷ steps_per_day + 1,
+        n_days = npts_to_use ÷ steps_per_day,
+        tap = tap,
+        allocation = allocation,
     )
 end
 
@@ -313,7 +389,8 @@ After Solve(), pull bus voltages, summary, and monitor time-series into DataFram
 function collect_results(output_dir::AbstractString;
                          slot_load_names::Vector{String} = String[],
                          n_slots::Int = 0,
-                         statcom_names::Vector{String} = String[])
+                         statcom_names::Vector{String} = String[],
+                         write_files::Bool = true)
     bus_names    = Circuit.AllBusNames()
     node_vmag_pu = Circuit.AllBusMagPu()
     node_names   = Circuit.AllNodeNames()
@@ -347,19 +424,19 @@ function collect_results(output_dir::AbstractString;
                   Float64(length(node_vmag_pu))],
     )
 
-    CSV.write(joinpath(output_dir, "node_voltages.csv"), voltages)
-    CSV.write(joinpath(output_dir, "summary.csv"), summary)
-    println("Snapshot results written to $output_dir")
-
     # ----- Time-series from monitors -----
     monitor_data = read_all_monitors(slot_load_names, n_slots, statcom_names)
 
-    ts_dir = joinpath(output_dir, "timeseries")
-    mkpath(ts_dir)
-    for (name, df) in pairs(monitor_data)
-        CSV.write(joinpath(ts_dir, "$(name).csv"), df)
+    if write_files
+        CSV.write(joinpath(output_dir, "node_voltages.csv"), voltages)
+        CSV.write(joinpath(output_dir, "summary.csv"), summary)
+        ts_dir = joinpath(output_dir, "timeseries")
+        mkpath(ts_dir)
+        for (name, df) in pairs(monitor_data)
+            CSV.write(joinpath(ts_dir, "$(name).csv"), df)
+        end
+        println("Raw results written to $output_dir ($(length(monitor_data)) monitors)")
     end
-    println("Time-series data written to $ts_dir ($(length(monitor_data)) monitors)")
 
     return (voltages = voltages, summary = summary, timeseries = monitor_data)
 end
